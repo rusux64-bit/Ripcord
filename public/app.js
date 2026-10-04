@@ -356,6 +356,7 @@ function go(stage, dir = 'forward') {
     const after = () => {
         const target = $(FOCUS_TARGET[stage]);
         if (target) target.focus({ preventScroll: true });
+        root.removeAttribute('data-dir');
     };
 
     root.dataset.dir = dir;
@@ -575,19 +576,42 @@ function refreshFormat() {
     el.formatHint.textContent = FORMAT_HINTS[fmt];
     el.qualityGroup.dataset.disabled = String(lossless);
     el.bitrate.disabled = lossless;
-    el.bitrateOut.textContent = lossless ? 'Lossless' : `${BITRATES[el.bitrate.value]} kbps`;
+    refreshSlider();
 }
 
 function refreshSlider() {
-    const pct = (el.bitrate.value / (el.bitrate.max - el.bitrate.min)) * 100;
+    const min = Number(el.bitrate.min) || 0;
+    const max = Number(el.bitrate.max) || 2;
+    const val = Math.max(min, Math.min(max, Number(el.bitrate.value) || 0));
+    const pct = ((val - min) / (max - min)) * 100;
     el.bitrate.style.setProperty('--fill', `${pct}%`);
-    el.bitrateOut.textContent = LOSSLESS.has(currentFormat()) ? 'Lossless' : `${BITRATES[el.bitrate.value]} kbps`;
+    const isLossless = LOSSLESS.has(currentFormat());
+    el.bitrateOut.textContent = isLossless ? 'Lossless' : `${BITRATES[val]} kbps`;
+    el.bitrate.setAttribute('aria-valuenow', String(val));
+    el.bitrate.setAttribute('aria-valuetext', isLossless ? 'Lossless' : `${BITRATES[val]} kbps`);
+    $$('.slider__ticks span').forEach(s => {
+        s.classList.toggle('active', Number(s.dataset.val) === val);
+    });
 }
 
 $$('input[name="format"]').forEach(i => i.addEventListener('change', refreshFormat));
 $$('input[name="namestyle"]').forEach(i => i.addEventListener('change', () => { nameTouched = false; refreshName(); }));
 el.clean.addEventListener('change', () => { nameTouched = false; refreshName(); });
 el.bitrate.addEventListener('input', refreshSlider);
+$$('.slider__ticks span').forEach(span => {
+    const pick = () => {
+        if (el.bitrate.disabled) return;
+        el.bitrate.value = span.dataset.val;
+        refreshSlider();
+    };
+    span.addEventListener('click', pick);
+    span.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            pick();
+        }
+    });
+});
 el.filename.addEventListener('input', () => { nameTouched = true; });
 
 function showOptions() {
@@ -967,3 +991,6 @@ syncPasteButton();
 setupSpin();
 syncThemeColorMeta();
 loadColourEngine();
+setTimeout(() => {
+    $('#stage')?.classList.remove('rise');
+}, 800);
