@@ -80,6 +80,8 @@ const MAX_COVER_BYTES = positiveIntegerEnv('MAX_COVER_BYTES', 5 * 1024 * 1024, 2
 const MAX_DOWNLOAD_BYTES = positiveIntegerEnv('MAX_DOWNLOAD_BYTES', 100 * 1024 * 1024, 512 * 1024 * 1024);
 const MAX_AUDIO_OUTPUT_BYTES = positiveIntegerEnv('MAX_AUDIO_OUTPUT_BYTES', 150 * 1024 * 1024, 512 * 1024 * 1024);
 const MAX_ZIP_TRACK_BYTES = positiveIntegerEnv('MAX_ZIP_TRACK_BYTES', 40 * 1024 * 1024, 128 * 1024 * 1024);
+// lossless tracks are ~5-10 MB/min, so they need a larger per-track cap than lossy formats
+const zipTrackLimit = format => (format === 'flac' || format === 'wav') ? Math.max(MAX_ZIP_TRACK_BYTES, MAX_AUDIO_OUTPUT_BYTES) : MAX_ZIP_TRACK_BYTES;
 const ENCODE_CONCURRENCY = positiveIntegerEnv('ENCODE_CONCURRENCY', Math.max(1, Math.min(2, os.cpus().length)), 8);
 const YTDLP_CONCURRENT_FRAGMENTS = positiveIntegerEnv('YTDLP_CONCURRENT_FRAGMENTS', 4, 16);
 const WORK_DIR = process.env.WORK_DIR || os.tmpdir();
@@ -411,6 +413,8 @@ function matchTokens(value) {
     return new Set(String(value || '')
         .normalize('NFKD')
         .replace(/[\u0300-\u036f]/g, '')
+        // collapse dotted acronyms such as "B.U.G." into "BUG" so they survive tokenizing
+        .replace(/(?:\p{L}\.){2,}\p{L}?/gu, m => m.replace(/\./g, ''))
         .replace(/([a-z])([A-Z])/g, '$1 $2')
         .toLowerCase()
         .replace(/vevo\b/g, ' ')
@@ -433,10 +437,13 @@ function tokenSimilarity(left, right) {
 
 function scoreSpotifyCandidate(track, candidate) {
     const titleScore = tokenSimilarity(track.title, candidate.title);
-    const artistScore = Math.max(
-        tokenSimilarity(track.artist, [candidate.artist, candidate.uploader, candidate.channel].filter(Boolean).join(' ')),
-        tokenSimilarity(track.artist, candidate.title)
-    );
+    const candidateArtist = [candidate.artist, candidate.uploader, candidate.channel].filter(Boolean).join(' ');
+    const credited = [track.artist, ...String(track.artist || '').split(/\s*,\s*/)].filter(Boolean);
+    // Featured artists are often missing from YouTube titles/channels, so score each credit separately.
+    const artistScore = Math.max(0, ...credited.map(name => Math.max(
+        tokenSimilarity(name, candidateArtist),
+        tokenSimilarity(name, candidate.title)
+    )));
     const expectedDuration = Number(track.durationMs) || null;
     const candidateDuration = Number(candidate.duration) > 0 ? Number(candidate.duration) * 1000 : null;
     let durationScore = null;
@@ -456,7 +463,8 @@ function scoreSpotifyCandidate(track, candidate) {
 }
 
 async function findSpotifyMatch(track, signal) {
-    const query = `${track.title} ${track.artist}`.replace(/[\r\n]+/g, ' ').slice(0, 300).trim();
+    const primaryArtist = String(track.artist || '').split(/\s*,\s*/)[0];
+    const query = `${track.title} ${primaryArtist === 'Unknown Artist' ? '' : primaryArtist}`.replace(/[\r\n]+/g, ' ').slice(0, 300).trim();
     const searchTarget = `ytsearch5:${query}`;
     const args = [
         '--dump-single-json', '--flat-playlist', '--skip-download', '--no-warnings',
@@ -780,8 +788,13 @@ async function getSpotifyData(url, signal) {
                         const trackData = t.track || t;
                         const title = safeMetadataText(trackData.title || trackData.name, 'Unknown Track');
                         let trackArtists = 'Unknown Artist';
-                        if (trackData.artists && Array.isArray(trackData.artists)) {
-                            trackArtists = safeMetadataText(trackData.artists.map(a => (typeof a === 'string' ? a : a.name)).join(', '), 'Unknown Artist');
+                        if (Array.isArray(trackData.artists) && trackData.artists.length > 0) {
+                            trackArtists = safeMetadataText(trackData.artists.map(a => (typeof a === 'string' ? a : a?.profile?.name || a?.name)).filter(Boolean).join(', '), 'Unknown Artist');
+                        } else if (Array.isArray(trackData.artists?.items) && trackData.artists.items.length > 0) {
+                            trackArtists = safeMetadataText(trackData.artists.items.map(a => a?.profile?.name || a?.name).filter(Boolean).join(', '), 'Unknown Artist');
+                        } else if (typeof trackData.subtitle === 'string' && trackData.subtitle.trim()) {
+                            // Embed trackList entries (playlists/albums) carry the artist(s) in `subtitle`.
+                            trackArtists = safeMetadataText(trackData.subtitle.replace(/\u00a0/g, ' '), 'Unknown Artist');
                         }
                         tracks.push({
                             title,
@@ -1152,16 +1165,16 @@ async function processPlaylistTrack(source, audioBitrate, audioFormat, signal) {
         Logger.info(copyAudio
             ? `[Track ${index + 1}] Remuxing ${sourceCodec} audio into [${audioFormat.toUpperCase()}]`
             : `[Track ${index + 1}] Encoding audio to [${audioFormat.toUpperCase()}] at ${audioBitrate} kbps`);
-        const args = ffmpegEncodeArgs(tempAudioPath, tempOutPath, audioFormat, audioBitrate, tempImgPath, title, artist, MAX_ZIP_TRACK_BYTES, copyAudio);
+        const args = ffmpegEncodeArgs(tempAudioPath, tempOutPath, audioFormat, audioBitrate, tempImgPath, title, artist, zipTrackLimit(audioFormat), copyAudio);
         await runFfmpeg(args, 'Track encoding timed out.', signal);
         if (signal?.aborted) throw new Error('Request cancelled.');
-        if (fs.statSync(tempOutPath).size >= MAX_ZIP_TRACK_BYTES) throw new Error('Playlist track exceeds the allowed size.');
+        if (fs.statSync(tempOutPath).size >= zipTrackLimit(audioFormat)) throw new Error('Playlist track exceeds the allowed size.');
 
         if (tempImgPath && fs.existsSync(tempOutPath) && (audioFormat === 'ogg' || audioFormat === 'flac')) {
             injectVorbisCoverArt(tempOutPath, tempImgPath, audioFormat);
         }
 
-        if (fs.statSync(tempOutPath).size > MAX_ZIP_TRACK_BYTES) throw new Error('Playlist track exceeds the allowed size.');
+        if (fs.statSync(tempOutPath).size > zipTrackLimit(audioFormat)) throw new Error('Playlist track exceeds the allowed size.');
         const safeName = sanitizeFilename(`${String(index + 1).padStart(2, '0')} - ${title} - ${artist}.${audioFormat}`);
 
         cleanupFiles(tempFiles.filter(file => file !== tempOutPath));
