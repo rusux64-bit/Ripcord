@@ -1,3 +1,33 @@
+@property --md-sys-color-primary {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #8b4f25;
+}
+
+@property --md-sys-color-primary-container {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #ffdbc8;
+}
+
+@property --md-sys-color-secondary-container {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #ffdbc8;
+}
+
+@property --md-sys-color-tertiary-container {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #e7e5ac;
+}
+
+@property --md-sys-color-surface-container {
+  syntax: "<color>";
+  inherits: true;
+  initial-value: #fcebe2;
+}
+
 :root {
   color-scheme: light dark;
 
@@ -274,7 +304,7 @@ button {
   opacity: 0.55;
   border-radius: 60% 40% 55% 45% / 55% 45% 60% 40%;
   translate: calc(var(--px, 0) * var(--k)) calc(var(--py, 0) * var(--k));
-  transition: translate 1s var(--ease-standard);
+  transition: translate 1s var(--ease-standard), background-color 0.8s var(--ease-standard), opacity 0.6s var(--ease-standard);
   animation: morph 18s ease-in-out infinite, drift 28s ease-in-out infinite;
 }
 
@@ -612,6 +642,7 @@ button {
   box-shadow:
     0 1px 2px rgb(0 0 0 / 0.06),
     0 32px 56px -28px color-mix(in srgb, var(--md-sys-color-primary) 45%, transparent);
+  transition: box-shadow 0.6s var(--ease-standard), background-color 0.6s var(--ease-standard);
   view-transition-name: stage;
 }
 
@@ -1679,9 +1710,18 @@ dialog::backdrop {
 
 ::view-transition-group(stage) {
   border-radius: var(--shape-xxl);
-  overflow: clip;
+  overflow: visible;
   animation-duration: 0.35s;
   animation-timing-function: var(--spring-spatial);
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.06),
+    0 32px 56px -28px color-mix(in srgb, var(--md-sys-color-primary) 45%, transparent);
+  transition: box-shadow 0.6s var(--ease-standard);
+}
+
+::view-transition-image-pair(stage) {
+  border-radius: var(--shape-xxl);
+  overflow: clip;
 }
 
 ::view-transition-old(stage) {
@@ -1703,36 +1743,36 @@ html[data-dir="back"]::view-transition-new(stage) {
 @keyframes stage-out {
   to {
     opacity: 0;
-    transform: translateX(-16px) scale(0.98);
+    transform: translateY(-8px) scale(0.98);
   }
 }
 
 @keyframes stage-in {
   from {
     opacity: 0;
-    transform: translateX(20px) scale(0.98);
+    transform: translateY(10px) scale(0.98);
   }
   to {
     opacity: 1;
-    transform: translateX(0) scale(1);
+    transform: translateY(0) scale(1);
   }
 }
 
 @keyframes stage-out-back {
   to {
     opacity: 0;
-    transform: translateX(16px) scale(0.98);
+    transform: translateY(8px) scale(0.98);
   }
 }
 
 @keyframes stage-in-back {
   from {
     opacity: 0;
-    transform: translateX(-20px) scale(0.98);
+    transform: translateY(-10px) scale(0.98);
   }
   to {
     opacity: 1;
-    transform: translateX(0) scale(1);
+    transform: translateY(0) scale(1);
   }
 }
 
