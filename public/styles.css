@@ -922,14 +922,14 @@ body[data-stage="working"] .media {
   outline-offset: 2px;
 }
 
-/* bitrate quality slider - Material 3 Expressive */
+/* bitrate quality slider */
 
 .slider input {
   --fill: 100%;
   --track: linear-gradient(to right,
-      var(--md-sys-color-primary) 0 clamp(0%, calc(var(--fill) - 6px), 100%),
-      transparent clamp(0%, calc(var(--fill) - 6px), 100%) clamp(0%, calc(var(--fill) + 6px), 100%),
-      var(--md-sys-color-surface-container-highest) clamp(0%, calc(var(--fill) + 6px), 100%) 100%);
+      var(--md-sys-color-primary) 0 calc(var(--fill) - 6px),
+      transparent calc(var(--fill) - 6px) calc(var(--fill) + 6px),
+      var(--md-sys-color-surface-container-highest) calc(var(--fill) + 6px) 100%);
   -webkit-appearance: none;
   appearance: none;
   display: block;
@@ -942,7 +942,6 @@ body[data-stage="working"] .media {
 
 .slider input:disabled {
   cursor: not-allowed;
-  opacity: 0.38;
 }
 
 .slider input::-webkit-slider-runnable-track {
@@ -965,6 +964,7 @@ body[data-stage="working"] .media {
   margin-top: -14px;
   border-radius: 2px;
   background: var(--md-sys-color-primary);
+  transition: width 0.3s var(--spring-spatial);
 }
 
 .slider input::-moz-range-thumb {
@@ -975,9 +975,12 @@ body[data-stage="working"] .media {
   background: var(--md-sys-color-primary);
 }
 
+.slider input:active::-webkit-slider-thumb {
+  width: 2px;
+}
+
 .slider input:focus-visible {
-  outline: 2px solid var(--md-sys-color-primary);
-  outline-offset: 4px;
+  outline-offset: 0;
   border-radius: 8px;
 }
 
@@ -985,32 +988,8 @@ body[data-stage="working"] .media {
   display: flex;
   justify-content: space-between;
   padding: 0 2px;
-  font: 600 0.75rem/1 var(--mono);
+  font: 600 0.75rem/1 var(--font);
   color: var(--md-sys-color-on-surface-variant);
-}
-
-.slider__ticks span {
-  cursor: pointer;
-  user-select: none;
-  padding: 2px 6px;
-  border-radius: 6px;
-  transition: color 0.2s var(--ease-standard), background-color 0.2s var(--ease-standard);
-}
-
-.slider__ticks span:hover {
-  background: var(--md-sys-color-surface-container-high);
-  color: var(--md-sys-color-on-surface);
-}
-
-.slider__ticks span.active {
-  color: var(--md-sys-color-primary);
-  font-weight: 700;
-}
-
-.slider input:disabled ~ .slider__ticks span {
-  cursor: not-allowed;
-  opacity: 0.38;
-  pointer-events: none;
 }
 
 /* tag chips */
@@ -1692,6 +1671,11 @@ dialog::backdrop {
 }
 
 /* smooth transitions between screens (Material 3 Container Transform & Shared Axis) */
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+}
 
 ::view-transition-group(stage) {
   border-radius: var(--shape-xxl);

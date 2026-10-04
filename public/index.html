@@ -126,12 +126,9 @@
                             </div>
                             <div class="slider">
                                 <input type="range" id="bitrate" min="0" max="2" step="1" value="2"
-                                    aria-describedby="bitrate-out" aria-label="Audio quality">
-                                <div class="slider__ticks" role="group" aria-label="Quality presets">
-                                    <span data-val="0" tabindex="0" role="button" aria-label="128 kbps">128</span>
-                                    <span data-val="1" tabindex="0" role="button" aria-label="192 kbps">192</span>
-                                    <span data-val="2" tabindex="0" role="button" aria-label="320 kbps">320</span>
-                                </div>
+                                    aria-describedby="bitrate-out">
+                                <div class="slider__ticks" aria-hidden="true">
+                                    <span>128</span><span>192</span><span>320</span></div>
                             </div>
                         </div>
 
