@@ -955,12 +955,23 @@ body[data-stage="working"] .media {
 
 /* bitrate quality slider */
 
+@property --slider-position {
+  syntax: "<percentage>";
+  inherits: true;
+  initial-value: 100%;
+}
+
+.slider {
+  --slider-position: 100%;
+  position: relative;
+  transition: --slider-position 0.3s var(--ease-standard);
+}
+
 .slider input {
-  --fill: 100%;
   --track: linear-gradient(to right,
-      var(--md-sys-color-primary) 0 calc(var(--fill) - 6px),
-      transparent calc(var(--fill) - 6px) calc(var(--fill) + 6px),
-      var(--md-sys-color-surface-container-highest) calc(var(--fill) + 6px) 100%);
+      var(--md-sys-color-primary) 0 calc(var(--slider-position) - 6px),
+      transparent calc(var(--slider-position) - 6px) calc(var(--slider-position) + 6px),
+      var(--md-sys-color-surface-container-highest) calc(var(--slider-position) + 6px) 100%);
   -webkit-appearance: none;
   appearance: none;
   display: block;
@@ -969,6 +980,18 @@ body[data-stage="working"] .media {
   margin: 0;
   background: transparent;
   cursor: pointer;
+}
+
+.slider__thumb {
+  position: absolute;
+  top: 0;
+  left: var(--slider-position);
+  width: 4px;
+  height: 44px;
+  border-radius: 2px;
+  background: var(--md-sys-color-primary);
+  pointer-events: none;
+  transform: translateX(-50%);
 }
 
 .slider input:disabled {
@@ -994,8 +1017,7 @@ body[data-stage="working"] .media {
   height: 44px;
   margin-top: -14px;
   border-radius: 2px;
-  background: var(--md-sys-color-primary);
-  transition: width 0.3s var(--spring-spatial);
+  background: transparent;
 }
 
 .slider input::-moz-range-thumb {
@@ -1003,11 +1025,7 @@ body[data-stage="working"] .media {
   height: 44px;
   border: 0;
   border-radius: 2px;
-  background: var(--md-sys-color-primary);
-}
-
-.slider input:active::-webkit-slider-thumb {
-  width: 2px;
+  background: transparent;
 }
 
 .slider input:focus-visible {
@@ -1796,6 +1814,12 @@ html[data-dir="back"]::view-transition-new(stage) {
   }
 }
 
+/* text selection */
+::selection {
+  background: var(--md-sys-color-inverse-surface);
+  color: var(--md-sys-color-inverse-on-surface);
+}
+
 /* disable animations for users who prefer reduced motion */
 
 @media (prefers-reduced-motion: reduce) {
@@ -1816,7 +1840,6 @@ html[data-dir="back"]::view-transition-new(stage) {
   ::view-transition-new(*) {
     animation: none !important;
   }
-
   /* keep a visible, static "working" state instead of a frozen sweep */
   .wavy[data-indeterminate="true"] .wavy__fill {
     width: 100%;

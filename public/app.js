@@ -581,7 +581,7 @@ function refreshFormat() {
 
 function refreshSlider() {
     const pct = (el.bitrate.value / (el.bitrate.max - el.bitrate.min)) * 100;
-    el.bitrate.style.setProperty('--fill', `${pct}%`);
+    el.bitrate.parentElement.style.setProperty('--slider-position', `${pct}%`);
     el.bitrateOut.textContent = LOSSLESS.has(currentFormat()) ? 'Lossless' : `${BITRATES[el.bitrate.value]} kbps`;
 }
 

@@ -127,6 +127,7 @@
                             <div class="slider">
                                 <input type="range" id="bitrate" min="0" max="2" step="1" value="2"
                                     aria-describedby="bitrate-out">
+                                <span class="slider__thumb" aria-hidden="true"></span>
                                 <div class="slider__ticks" aria-hidden="true">
                                     <span>128</span><span>192</span><span>320</span></div>
                             </div>
@@ -146,16 +147,10 @@
 
                         <fieldset class="group" id="name-group">
                             <legend class="label">File name</legend>
-                            <div class="chips" id="name-style">
-                                <label class="chip"><input type="radio" name="namestyle" value="title"
-                                        checked><span><span class="icon"
-                                            aria-hidden="true">check</span>Title</span></label>
-                                <label class="chip"><input type="radio" name="namestyle"
-                                        value="title_artist"><span><span class="icon"
-                                            aria-hidden="true">check</span>Title - Artist</span></label>
-                                <label class="chip"><input type="radio" name="namestyle"
-                                        value="artist_title"><span><span class="icon"
-                                            aria-hidden="true">check</span>Artist - Title</span></label>
+                            <div class="segmented" role="presentation" id="name-style">
+                                <label><input type="radio" name="namestyle" value="title" checked><span>Title</span></label>
+                                <label><input type="radio" name="namestyle" value="title_artist"><span>Title - Artist</span></label>
+                                <label><input type="radio" name="namestyle" value="artist_title"><span>Artist - Title</span></label>
                             </div>
                             <div class="field">
                                 <input id="filename" type="text" placeholder=" " autocomplete="off" spellcheck="false"
