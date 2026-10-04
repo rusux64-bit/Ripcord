@@ -1277,6 +1277,7 @@ body[data-stage="working"] .media {
 .wavy {
   --wave: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='12' viewBox='0 0 24 12'%3E%3Cpath d='M0 6 Q6 0 12 6 T24 6' fill='none' stroke='black' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E");
   position: relative;
+  --pn: 0;
   height: 12px;
   overflow: hidden;
 }
@@ -1293,18 +1294,44 @@ body[data-stage="working"] .media {
 
 .wavy::before {
   width: 100%;
-  background: var(--md-sys-color-surface-container-highest);
+  background: var(--md-sys-color-outline-variant);
 }
 
+/*
+ * --pn is overall progress as a 0..1 number. The fill blends smoothly
+ * tertiary (0-33%) -> secondary (34-66%) -> primary (67-99%) using only theme roles.
+ */
 .wavy__fill {
+  --c-low: color-mix(in oklch,
+      var(--md-sys-color-secondary) calc(clamp(0, (var(--pn) - 0.2) / 0.27, 1) * 100%),
+      var(--md-sys-color-tertiary));
+  --c-mid: color-mix(in oklch,
+      var(--md-sys-color-primary) calc(clamp(0, (var(--pn) - 0.53) / 0.27, 1) * 100%),
+      var(--c-low));
   width: var(--p, 0%);
-  background: var(--md-sys-color-primary);
-  transition: width 0.5s var(--spring-effects);
+  background: var(--c-mid);
+  transition: width 0.5s var(--spring-effects), background-color 0.6s var(--ease-standard);
 }
 
 .wavy[data-indeterminate="true"] .wavy__fill {
   width: 34%;
+  background: var(--md-sys-color-primary);
   animation: wave 0.9s linear infinite, sweep 1.8s var(--ease-standard) infinite;
+}
+
+/* finished: settle the wave and switch to the success container role */
+.wavy[data-complete="true"] {
+  border-radius: 9999px;
+  background: var(--md-sys-color-primary-container);
+}
+
+.wavy[data-complete="true"]::before {
+  background: transparent;
+}
+
+.wavy[data-complete="true"] .wavy__fill {
+  background: var(--md-sys-color-on-primary-container);
+  animation-play-state: paused;
 }
 
 @keyframes wave {
@@ -1330,6 +1357,127 @@ body[data-stage="working"] .media {
   gap: 12px;
   font: 500 0.8125rem/1 var(--mono);
   color: var(--md-sys-color-on-surface-variant);
+}
+
+/* per-track list in the download screen */
+
+.tracklist {
+  max-height: min(320px, 38vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-radius: 16px;
+  background: var(--md-sys-color-surface-container-low);
+  scrollbar-width: thin;
+  scrollbar-color: var(--md-sys-color-outline-variant) transparent;
+}
+
+.tracklist__list {
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+}
+
+.track {
+  display: grid;
+  grid-template-columns: 2.25rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 8px 16px 8px 8px;
+  /* cheap rendering for long (100+) lists */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 56px;
+  transition: background-color 0.3s var(--ease-standard);
+}
+
+.track[data-state="matching"],
+.track[data-state="downloading"],
+.track[data-state="encoding"] {
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}
+
+.track[data-state="matching"] :is(.track__num, .track__sub, .track__status),
+.track[data-state="downloading"] :is(.track__num, .track__sub, .track__status),
+.track[data-state="encoding"] :is(.track__num, .track__sub, .track__status) {
+  color: var(--md-sys-color-on-secondary-container);
+}
+
+.track__num {
+  font: 500 0.75rem/1 var(--mono);
+  text-align: center;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.track__text {
+  display: grid;
+  min-width: 0;
+}
+
+.track__title,
+.track__sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.track__title {
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+  letter-spacing: 0.006em;
+}
+
+.track__sub {
+  font-size: 0.75rem;
+  line-height: 1rem;
+  letter-spacing: 0.025em;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.track__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.track__status .icon {
+  font-size: 20px;
+}
+
+.track[data-state="done"] .track__status .icon {
+  color: var(--md-sys-color-primary);
+}
+
+.track[data-state="failed"] .track__status,
+.track[data-state="failed"] .track__status .icon {
+  color: var(--md-sys-color-error);
+}
+
+/* small M3 circular progress indicator (determinate via --tp, otherwise spinning) */
+.spinner {
+  --tp: 0.25;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  border-radius: 50%;
+  background: conic-gradient(var(--md-sys-color-primary) calc(var(--tp) * 1turn), var(--md-sys-color-outline-variant) 0);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 3px));
+}
+
+.spinner[data-indeterminate="true"] {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    rotate: 1turn;
+  }
 }
 
 /* finished download screen */
@@ -1621,6 +1769,19 @@ html[data-dir="back"]::view-transition-new(screen) {
   ::view-transition-group(*),
   ::view-transition-old(*),
   ::view-transition-new(*) {
+    animation: none !important;
+  }
+
+  /* keep a visible, static "working" state instead of a frozen sweep */
+  .wavy[data-indeterminate="true"] .wavy__fill {
+    width: 100%;
+    translate: none;
+    opacity: 0.45;
+    animation: none !important;
+  }
+
+  .wavy::before,
+  .wavy__fill {
     animation: none !important;
   }
 }

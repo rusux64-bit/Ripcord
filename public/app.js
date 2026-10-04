@@ -43,6 +43,8 @@ const el = {
     metaLeft: $('#meta-left'),
     metaRight: $('#meta-right'),
     workingHint: $('#working-hint'),
+    tracklistWrap: $('#tracklist-wrap'),
+    tracklist: $('#tracklist'),
     cancelBtn: $('#cancel-btn'),
     doneTitle: $('#done-title'),
     doneSub: $('#done-sub'),
@@ -68,7 +70,11 @@ const state = {
     blob: null,
     blobName: '',
     timer: 0,
-    startedAt: 0
+    startedAt: 0,
+    jobId: '',
+    poll: 0,
+    rows: [],
+    activeRow: -1
 };
 
 const BITRATES = [128, 192, 320];
@@ -642,12 +648,14 @@ function startDownload() {
     el.workingTitle.textContent = isCollection ? 'Packing up your collection' : 'Pulling the sound out';
     el.metaLeft.textContent = 'Getting started';
     el.metaRight.textContent = '0:00';
-    el.wavy.dataset.indeterminate = 'true';
-    el.wavy.style.removeProperty('--p');
-    el.wavy.removeAttribute('aria-valuenow');
+    resetProgressBar();
     el.workingHint.textContent = isCollection
         ? 'Collections are prepared track by track, so this can take a few minutes. You can leave this tab open.'
         : 'Finding the audio and converting it. Usually under a minute.';
+
+    state.jobId = isCollection ? newJobId() : '';
+    if (state.jobId) params.set('job', state.jobId);
+    renderTrackList(isCollection ? collectionTracks(info) : []);
 
     state.startedAt = Date.now();
     clearInterval(state.timer);
@@ -662,12 +670,12 @@ function startDownload() {
 
     xhr.onprogress = event => {
         if (event.loaded === 0) return;
+        // collections report per-track progress through the job poller instead of ZIP bytes
+        if (state.jobId) return;
         if (event.lengthComputable && event.total > 0) {
-            const pct = Math.min(100, Math.round((event.loaded / event.total) * 100));
-            el.wavy.dataset.indeterminate = 'false';
-            el.wavy.style.setProperty('--p', `${pct}%`);
-            el.wavy.setAttribute('aria-valuenow', String(pct));
-            el.metaLeft.textContent = `${pct}% - ${formatMB(event.loaded)} of ${formatMB(event.total)}`;
+            const fraction = Math.min(1, event.loaded / event.total);
+            const pct = setProgress(fraction);
+            el.metaLeft.textContent = `${pct}% · ${formatMB(event.loaded)} of ${formatMB(event.total)}`;
         } else {
             // show how many megabytes have been downloaded so far
             el.metaLeft.textContent = `${formatMB(event.loaded)} received`;
@@ -677,6 +685,7 @@ function startDownload() {
     xhr.onload = async () => {
         stopTimer();
         if (xhr.status >= 200 && xhr.status < 300) {
+            setProgress(1);
             state.blob = xhr.response;
             state.blobName = saveName;
             saveBlob();
@@ -694,12 +703,197 @@ function startDownload() {
     xhr.onabort = () => { stopTimer(); };
 
     xhr.send();
+    if (state.jobId) pollJob(state.jobId);
     go('working', 'forward');
 }
 
 function stopTimer() {
     clearInterval(state.timer);
     state.timer = 0;
+    stopPolling();
+}
+
+// per-track progress for collections
+
+const TRACK_STATES = {
+    queued: { icon: 'schedule', label: 'Queued' },
+    matching: { spinner: true, label: 'Finding' },
+    downloading: { spinner: true, label: 'Downloading' },
+    encoding: { spinner: true, label: 'Converting' },
+    done: { icon: 'check_circle', label: 'Done' },
+    failed: { icon: 'error', label: 'Failed' }
+};
+
+function newJobId() {
+    if (crypto.randomUUID) return crypto.randomUUID();
+    // randomUUID is unavailable on plain-http hosts, so fall back to random hex
+    return [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function collectionTracks(info) {
+    if (Array.isArray(info.tracks) && info.tracks.length) return info.tracks;
+    return Array.from({ length: Number(info.trackCount) || 0 }, (_, i) => ({ title: `Track ${i + 1}`, artist: '' }));
+}
+
+// how far along one track is, from 0 to 1; failed tracks count as processed
+function trackFraction(track) {
+    switch (track.state) {
+        case 'matching': return 0.05;
+        case 'downloading': return 0.05 + 0.75 * (Number(track.progress) || 0);
+        case 'encoding': return 0.85;
+        case 'done':
+        case 'failed': return 1;
+        default: return 0;
+    }
+}
+
+function resetProgressBar() {
+    el.wavy.dataset.indeterminate = 'true';
+    el.wavy.dataset.complete = 'false';
+    el.wavy.style.removeProperty('--p');
+    el.wavy.style.removeProperty('--pn');
+    el.wavy.removeAttribute('aria-valuenow');
+    el.wavy.removeAttribute('aria-valuetext');
+}
+
+// drive the wavy bar from a 0..1 fraction; returns the rounded percentage
+function setProgress(fraction, valueText) {
+    const clamped = Math.max(0, Math.min(1, fraction));
+    const pct = Math.round(clamped * 100);
+    el.wavy.dataset.indeterminate = 'false';
+    el.wavy.dataset.complete = String(pct >= 100);
+    el.wavy.style.setProperty('--p', `${(clamped * 100).toFixed(2)}%`);
+    el.wavy.style.setProperty('--pn', clamped.toFixed(4));
+    el.wavy.setAttribute('aria-valuenow', String(pct));
+    el.wavy.setAttribute('aria-valuetext', valueText ? `${valueText}, ${pct}%` : `${pct}%`);
+    return pct;
+}
+
+function renderTrackList(tracks) {
+    state.rows = [];
+    state.activeRow = -1;
+    el.tracklist.replaceChildren();
+    el.tracklistWrap.hidden = tracks.length === 0;
+    el.tracklistWrap.scrollTop = 0;
+    const fragment = document.createDocumentFragment();
+    tracks.forEach((track, index) => {
+        const li = document.createElement('li');
+        li.className = 'track';
+        const num = document.createElement('span');
+        num.className = 'track__num';
+        num.setAttribute('aria-hidden', 'true');
+        num.textContent = String(index + 1);
+        const text = document.createElement('span');
+        text.className = 'track__text';
+        const title = document.createElement('span');
+        title.className = 'track__title';
+        title.textContent = track.title || `Track ${index + 1}`;
+        title.title = title.textContent;
+        text.append(title);
+        if (track.artist) {
+            const sub = document.createElement('span');
+            sub.className = 'track__sub';
+            sub.textContent = track.artist;
+            sub.title = track.artist;
+            text.append(sub);
+        }
+        const status = document.createElement('span');
+        status.className = 'track__status';
+        li.append(num, text, status);
+        fragment.append(li);
+        const row = { li, status, key: '' };
+        state.rows.push(row);
+        updateTrackRow(row, { state: 'queued', progress: 0 });
+    });
+    el.tracklist.append(fragment);
+}
+
+function updateTrackRow(row, track) {
+    const info = TRACK_STATES[track.state] || TRACK_STATES.queued;
+    const pct = Math.round((Number(track.progress) || 0) * 100);
+    const determinate = track.state === 'downloading' && pct > 0;
+    const key = `${track.state}:${determinate ? pct : ''}:${track.error || ''}`;
+    if (row.key === key) return;
+    row.key = key;
+    row.li.dataset.state = track.state in TRACK_STATES ? track.state : 'queued';
+
+    const label = document.createElement('span');
+    label.textContent = track.state === 'failed' && track.error
+        ? track.error
+        : determinate ? `${info.label} ${pct}%` : info.label;
+
+    let indicator;
+    if (info.spinner) {
+        indicator = document.createElement('span');
+        indicator.className = 'spinner';
+        indicator.setAttribute('aria-hidden', 'true');
+        if (determinate) indicator.style.setProperty('--tp', String(pct / 100));
+        else indicator.dataset.indeterminate = 'true';
+    } else {
+        indicator = document.createElement('span');
+        indicator.className = `icon${track.state === 'done' ? ' fill' : ''}`;
+        indicator.setAttribute('aria-hidden', 'true');
+        indicator.textContent = info.icon;
+    }
+    row.status.replaceChildren(label, indicator);
+}
+
+function scrollRowIntoView(index) {
+    const row = state.rows[index];
+    if (!row) return;
+    const wrap = el.tracklistWrap;
+    const top = row.li.offsetTop - wrap.offsetTop;
+    const bottom = top + row.li.offsetHeight;
+    // scroll only the list, never the page
+    if (top < wrap.scrollTop || bottom > wrap.scrollTop + wrap.clientHeight) {
+        wrap.scrollTo({ top: Math.max(0, top - 8), behavior: reduceMotion.matches ? 'auto' : 'smooth' });
+    }
+}
+
+function applyJob(job) {
+    const tracks = Array.isArray(job.tracks) ? job.tracks : [];
+    if (!tracks.length) return;
+    if (tracks.length !== state.rows.length) renderTrackList(tracks);
+    tracks.forEach((track, i) => updateTrackRow(state.rows[i], track));
+
+    const total = tracks.length;
+    const processed = tracks.filter(t => t.state === 'done' || t.state === 'failed').length;
+    const failed = tracks.filter(t => t.state === 'failed').length;
+    const overall = tracks.reduce((sum, t) => sum + trackFraction(t), 0) / total;
+
+    const current = Math.min(total, processed + 1);
+    const phase = processed >= total ? 'Zipping up' : `Downloading ${current} of ${total}`;
+    const pct = setProgress(overall, phase);
+    el.metaLeft.textContent = `${phase} · ${pct}%${failed ? ` · ${failed} failed` : ''}`;
+
+    const active = tracks.findIndex(t => t.state === 'matching' || t.state === 'downloading' || t.state === 'encoding');
+    if (active !== -1 && active !== state.activeRow) {
+        state.activeRow = active;
+        scrollRowIntoView(active);
+    }
+}
+
+function pollJob(jobId) {
+    stopPolling();
+    const tick = async () => {
+        if (state.jobId !== jobId) return;
+        try {
+            const res = await fetch(`/api/progress/${encodeURIComponent(jobId)}`, { cache: 'no-store' });
+            if (state.jobId !== jobId) return;
+            if (res.ok) {
+                const job = await res.json();
+                applyJob(job);
+                if (job.status && job.status !== 'running') return;
+            }
+        } catch { /* transient network hiccup; try again on the next tick */ }
+        if (state.jobId === jobId) state.poll = setTimeout(tick, 1000);
+    };
+    state.poll = setTimeout(tick, 600);
+}
+
+function stopPolling() {
+    clearTimeout(state.poll);
+    state.poll = 0;
 }
 
 function saveBlob() {
@@ -746,6 +940,8 @@ function celebrate() {
 
 el.downloadBtn.addEventListener('click', startDownload);
 el.cancelBtn.addEventListener('click', () => {
+    state.jobId = '';
+    stopPolling();
     if (state.xhr) state.xhr.abort();
     state.xhr = null;
     toast('Cancelled.');

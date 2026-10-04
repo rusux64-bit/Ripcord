@@ -187,8 +187,13 @@
                     <div class="stack">
                         <h2 class="t-title" id="working-title" tabindex="-1">Warming things up</h2>
                         <div class="wavy" id="wavy" data-indeterminate="true" role="progressbar"
-                            aria-labelledby="working-title" aria-valuemin="0" aria-valuemax="100"></div>
+                            aria-labelledby="working-title" aria-valuemin="0" aria-valuemax="100">
+                            <span class="wavy__fill" aria-hidden="true"></span>
+                        </div>
                         <div class="meta"><span id="meta-left">Getting started</span><span id="meta-right">0:00</span>
+                        </div>
+                        <div class="tracklist" id="tracklist-wrap" hidden>
+                            <ol class="tracklist__list" id="tracklist" aria-label="Tracks in this collection"></ol>
                         </div>
                         <p class="supporting" id="working-hint">Big collections take a while to prepare. You can leave
                             this tab open.</p>
