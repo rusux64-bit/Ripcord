@@ -444,11 +444,236 @@ function getSpotifyDurationMs(track) {
     return duration < 1000 ? Math.round(duration * 1000) : Math.round(duration);
 }
 
+// ==================== Spotify -> YouTube Matching Engine ====================
+
+const ARTIST_SPLIT_REGEX = /\s*(?:,|&|\band\b|\bfeat\.?|\bft\.?|\bfeaturing\b|\bwith\b|\bx\b|×|\/|;)\s*/i;
+const TITLE_FEAT_REGEX = /(?:[\(\[]|\s*-\s*|\s)(?:feat\.?|ft\.?|featuring|with)\s+([^()\[\]\-]+)(?:[\)\]])?/gi;
+
+function normalizeText(text) {
+    if (typeof text !== 'string' && typeof text !== 'number') return '';
+    return String(text)
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[øØ]/g, 'o')
+        .replace(/[æÆ]/g, 'ae')
+        .replace(/[œŒ]/g, 'oe')
+        .replace(/[ß]/g, 'ss')
+        .replace(/[łŁ]/g, 'l')
+        .replace(/[đĐ]/g, 'd')
+        .replace(/(?:\p{L}\.){2,}\p{L}?/gu, m => m.replace(/\./g, ''))
+        .replace(/([a-z])([A-Z])/g, '$1 $2')
+        .toLowerCase()
+        .replace(/[\u2010-\u2015\u2212]/g, '-')
+        .replace(/[\u2018\u2019\u00B4`]/g, "'")
+        .replace(/[\u201C\u201D]/g, '"')
+        .replace(/&/g, ' and ')
+        .replace(/\s*\+\s*/g, ' and ')
+        .replace(/[^\p{L}\p{N}'-]+/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function normalizeToAlphaNumeric(text) {
+    return normalizeText(text).replace(/['-]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function normalizeArtistName(name) {
+    let normalized = normalizeText(name);
+    if (normalized.startsWith('the ')) normalized = normalized.slice(4).trim();
+    return normalized;
+}
+
+function extractVersionInfo(title) {
+    const raw = typeof title === 'string' ? title : String(title || '');
+    const normalizedRaw = normalizeText(raw);
+
+    const version = {
+        isRemix: false,
+        remixDetails: null,
+        isLive: false,
+        liveDetails: null,
+        isAcoustic: false,
+        isInstrumental: false,
+        isKaraoke: false,
+        isRadioEdit: false,
+        isExtended: false,
+        isRemastered: false,
+        remasterYear: null,
+        isClean: false,
+        isExplicit: false,
+        isCover: false,
+        isReaction: false,
+        isTutorial: false,
+        isSlowedOrSpedUp: false,
+        isNightcore: false,
+        isBassBoosted: false,
+        is8D: false,
+        isAiCover: false,
+        isLyricVideo: false,
+        isOfficialAudio: false,
+        isOfficialVideo: false,
+        isTopic: false
+    };
+
+    if (/\bremix(?:ed)?\b|\bvip mix\b|\bdub mix\b|\bbootleg\b|\bflip\b/i.test(normalizedRaw)) {
+        version.isRemix = true;
+        const match = normalizedRaw.match(/([a-z0-9 ]+?\s+(?:remix|vip mix|dub mix|bootleg))/i);
+        if (match) version.remixDetails = match[1].trim();
+    }
+    if (/\b(?:live|in concert|tour|unplugged)\b/i.test(normalizedRaw)) {
+        version.isLive = true;
+        const match = normalizedRaw.match(/\b(live(?:\s+(?:at|from|in)\s+[a-z0-9 ]+)?)\b/i);
+        if (match) version.liveDetails = match[1].trim();
+    }
+    if (/\bacoustic\b|\bacoustic version\b|\bacoustic mix\b|\bpiano version\b/i.test(normalizedRaw)) {
+        version.isAcoustic = true;
+    }
+    if (/\binstrumental\b|\boff vocal\b|\bbacking track\b|\bno vocal\b/i.test(normalizedRaw)) {
+        version.isInstrumental = true;
+    }
+    if (/\bkaraoke\b/i.test(normalizedRaw)) version.isKaraoke = true;
+    if (/\bradio edit\b|\bradio mix\b|\bradio version\b|\bsingle version\b/i.test(normalizedRaw)) version.isRadioEdit = true;
+    if (/\bextended mix\b|\bextended version\b|\bextended\b|\bclub mix\b/i.test(normalizedRaw)) version.isExtended = true;
+    if (/\bremaster(?:ed)?\b|\bdigital remaster\b|\bdeluxe edition\b|\banniversary edition\b/i.test(normalizedRaw)) {
+        version.isRemastered = true;
+        const yearMatch = normalizedRaw.match(/\b(19\d{2}|20\d{2})\s+remaster\b|\bremaster(?:ed)?\s+(19\d{2}|20\d{2})\b/i);
+        if (yearMatch) version.remasterYear = Number(yearMatch[1] || yearMatch[2]);
+    }
+    if (/\bclean version\b|\bclean edit\b|\bclean\b/i.test(normalizedRaw)) version.isClean = true;
+    if (/\bexplicit\b|\bexplicit version\b/i.test(normalizedRaw)) version.isExplicit = true;
+
+    if (/\bcover\b|\bcover version\b|\btribute\b/i.test(normalizedRaw)) version.isCover = true;
+    if (/\breaction\b|\breacts\b/i.test(normalizedRaw)) version.isReaction = true;
+    if (/\btutorial\b|\bhow to play\b|\bguitar lesson\b|\bpiano tutorial\b/i.test(normalizedRaw)) version.isTutorial = true;
+    if (/\bsped up\b|\bspeed up\b|\bslowed\b|\bslowed \+ reverb\b|\bslowed and reverb\b/i.test(normalizedRaw)) version.isSlowedOrSpedUp = true;
+    if (/\bnightcore\b/i.test(normalizedRaw)) version.isNightcore = true;
+    if (/\bbass boosted\b|\bbassboosted\b/i.test(normalizedRaw)) version.isBassBoosted = true;
+    if (/\b8d\b|\b8d audio\b/i.test(normalizedRaw)) version.is8D = true;
+    if (/\bai cover\b|\bai voice\b|\bai version\b/i.test(normalizedRaw)) version.isAiCover = true;
+    if (/\blyrics?\b|\blyric video\b/i.test(normalizedRaw)) version.isLyricVideo = true;
+
+    if (/\bofficial audio\b|\baudio\b/i.test(normalizedRaw)) version.isOfficialAudio = true;
+    if (/\bofficial (?:music )?video\b|\bmusic video\b/i.test(normalizedRaw)) version.isOfficialVideo = true;
+    if (/\btopic\b/i.test(normalizedRaw)) version.isTopic = true;
+
+    const videoFluffRegex = /\s*[\(\[](?:official\s+(?:music\s+)?video|official\s+audio|official\s+visualizer|audio|video|visualizer|hd|4k|hq|lyrics?|lyric\s+video|color\s+coded|stream|music\s+video|official)[\)\]]\s*/gi;
+    let clean = raw.replace(videoFluffRegex, ' ').trim();
+
+    const versionNoiseRegex = /\s*[\(\[](?:remaster(?:ed)?.*?|\d{4}\s+remaster.*?|live.*?|acoustic.*?|radio\s+(?:edit|mix|version)|extended.*?|club\s+mix.*?|remix.*?|.*?remix|instrumental.*?|karaoke.*?|deluxe.*?|clean.*?|explicit.*?|single\s+version|album\s+version|original\s+mix)[\)\]]\s*/gi;
+    let base = clean.replace(versionNoiseRegex, ' ').trim();
+    base = base.replace(/\s*-\s*(?:live|remaster(?:ed)?(?:\s+\d{4})?|acoustic|instrumental|radio\s+edit|extended\s+mix|deluxe\s+edition)\b.*$/i, '').trim();
+
+    base = base.replace(TITLE_FEAT_REGEX, '').trim();
+    clean = clean.replace(TITLE_FEAT_REGEX, '').trim();
+
+    base = base.replace(/\s+/g, ' ').replace(/\s+-\s*$/, '').trim();
+    clean = clean.replace(/\s+/g, ' ').replace(/\s+-\s*$/, '').trim();
+
+    return {
+        rawTitle: raw,
+        baseTitle: base || raw,
+        cleanTitle: clean || raw,
+        normalizedBase: normalizeText(base || raw),
+        version
+    };
+}
+
+function parseArtists(artistString, titleString = '') {
+    const rawArtists = typeof artistString === 'string' ? artistString : String(artistString || '');
+    const tokens = new Set();
+    const list = [];
+
+    function addArtist(name) {
+        if (!name) return;
+        const cleaned = name.replace(/^[\s,;&\-]+|[\s,;&\-]+$/g, '').trim();
+        if (!cleaned || cleaned.toLowerCase() === 'unknown artist') return;
+        const norm = normalizeArtistName(cleaned);
+        if (norm && !tokens.has(norm)) {
+            tokens.add(norm);
+            list.push(cleaned);
+        }
+    }
+
+    if (rawArtists) {
+        for (const part of rawArtists.split(ARTIST_SPLIT_REGEX)) addArtist(part);
+    }
+
+    if (titleString) {
+        let match;
+        const regex = new RegExp(TITLE_FEAT_REGEX.source, 'gi');
+        while ((match = regex.exec(titleString)) !== null) {
+            if (match[1]) {
+                for (const fp of match[1].split(ARTIST_SPLIT_REGEX)) addArtist(fp);
+            }
+        }
+    }
+
+    const primary = list[0] || 'Unknown Artist';
+    const featured = list.slice(1);
+
+    return {
+        raw: rawArtists,
+        primary,
+        featured,
+        all: list,
+        normalizedPrimary: normalizeArtistName(primary),
+        normalizedFeatured: featured.map(normalizeArtistName),
+        normalizedAll: list.map(normalizeArtistName)
+    };
+}
+
+function parseYouTubeCandidate(candidate) {
+    const rawTitle = String(candidate?.title || '');
+    const uploader = String(candidate?.uploader || candidate?.channel || '');
+    const channelId = String(candidate?.channel_id || candidate?.uploader_id || '');
+    const duration = Number(candidate?.duration) > 0 ? Number(candidate?.duration) : null;
+    const durationMs = duration ? Math.round(duration * 1000) : null;
+    const album = String(candidate?.album || '').trim();
+
+    const titleInfo = extractVersionInfo(rawTitle);
+    const normUploader = normalizeText(uploader);
+    const isTopicChannel = normUploader.endsWith('topic') || normUploader.endsWith('- topic') || /release - topic/i.test(uploader);
+    const isVevoChannel = /vevo\b/i.test(uploader);
+
+    if (isTopicChannel) titleInfo.version.isTopic = true;
+
+    let parsedArtist = null;
+    let parsedSongTitle = null;
+    const dashIndex = rawTitle.search(/\s+[-–—]\s+/);
+    if (dashIndex > 0) {
+        parsedArtist = rawTitle.slice(0, dashIndex).trim();
+        parsedSongTitle = rawTitle.slice(dashIndex).replace(/^\s*[-–—]\s*/, '').trim();
+    }
+    const parsedTitleInfo = parsedSongTitle ? extractVersionInfo(parsedSongTitle) : null;
+
+    return {
+        id: String(candidate?.id || candidate?.url || ''),
+        rawTitle,
+        uploader,
+        channelId,
+        duration,
+        durationMs,
+        album,
+        isTopicChannel,
+        isVevoChannel,
+        titleInfo,
+        parsedArtist,
+        parsedSongTitle,
+        parsedTitleInfo,
+        rawCandidate: candidate
+    };
+}
+
 function matchTokens(value) {
     return new Set(String(value || '')
         .normalize('NFKD')
         .replace(/[\u0300-\u036f]/g, '')
-        // collapse dotted acronyms such as "B.U.G." into "BUG" so they survive tokenizing
+        .replace(/[øØ]/g, 'o')
+        .replace(/[æÆ]/g, 'ae')
+        .replace(/[œŒ]/g, 'oe')
+        .replace(/[ß]/g, 'ss')
+        .replace(/[łŁ]/g, 'l')
+        .replace(/[đĐ]/g, 'd')
         .replace(/(?:\p{L}\.){2,}\p{L}?/gu, m => m.replace(/\./g, ''))
         .replace(/([a-z])([A-Z])/g, '$1 $2')
         .toLowerCase()
@@ -470,37 +695,398 @@ function tokenSimilarity(left, right) {
     return (2 * overlap) / (a.size + b.size);
 }
 
-function scoreSpotifyCandidate(track, candidate) {
-    const titleScore = tokenSimilarity(track.title, candidate.title);
-    const candidateArtist = [candidate.artist, candidate.uploader, candidate.channel].filter(Boolean).join(' ');
-    const credited = [track.artist, ...String(track.artist || '').split(/\s*,\s*/)].filter(Boolean);
-    // Featured artists are often missing from YouTube titles/channels, so score each credit separately.
-    const artistScore = Math.max(0, ...credited.map(name => Math.max(
-        tokenSimilarity(name, candidateArtist),
-        tokenSimilarity(name, candidate.title)
-    )));
-    const expectedDuration = Number(track.durationMs) || null;
-    const candidateDuration = Number(candidate.duration) > 0 ? Number(candidate.duration) * 1000 : null;
-    let durationScore = null;
+function calculateDurationScore(expectedMs, candidateDurationSec) {
+    if (!expectedMs || !candidateDurationSec) return null;
+    const expectedSec = expectedMs / 1000;
+    const diffSec = Math.abs(expectedSec - candidateDurationSec);
+    const allowedCeiling = Math.max(40, expectedSec * 0.25);
+    if (diffSec > allowedCeiling) return { score: 0, diffSec, disqualified: true };
 
-    if (expectedDuration && candidateDuration) {
-        const differenceSeconds = Math.abs(expectedDuration - candidateDuration) / 1000;
-        // A much longer/shorter result is usually a mix, compilation, or wrong song.
-        if (differenceSeconds > Math.max(40, expectedDuration / 1000 * 0.25)) return null;
-        durationScore = Math.max(0, 1 - differenceSeconds / Math.max(20, expectedDuration / 1000 * 0.18));
-    }
+    let score;
+    if (diffSec <= 2) score = 1.0;
+    else if (diffSec <= 5) score = 0.95;
+    else if (diffSec <= 10) score = 0.85;
+    else if (diffSec <= 20) score = 0.65;
+    else if (diffSec <= 35) score = 0.40;
+    else score = Math.max(0.05, 1 - (diffSec / allowedCeiling));
 
-    const confidence = durationScore === null
-        ? titleScore * 0.64 + artistScore * 0.36
-        : titleScore * 0.54 + artistScore * 0.30 + durationScore * 0.16;
-    if (titleScore < 0.42 || (artistScore < 0.18 && titleScore < 0.82) || confidence < 0.58) return null;
-    return { confidence, titleScore, artistScore, durationScore };
+    return { score, diffSec, disqualified: false };
 }
 
-async function findSpotifyMatch(track, signal) {
-    const primaryArtist = String(track.artist || '').split(/\s*,\s*/)[0];
-    const query = `${track.title} ${primaryArtist === 'Unknown Artist' ? '' : primaryArtist}`.replace(/[\r\n]+/g, ' ').slice(0, 300).trim();
-    const searchTarget = `ytsearch5:${query}`;
+function containsPhrase(source, target) {
+    if (!source || !target) return false;
+    return ` ${normalizeToAlphaNumeric(source)} `.includes(` ${normalizeToAlphaNumeric(target)} `);
+}
+
+function scoreTitle(spotifyTitleInfo, parsedCandidate, reasons) {
+    const spotNormBase = spotifyTitleInfo.normalizedBase;
+    const candNormBase = parsedCandidate.titleInfo.normalizedBase;
+    const candParsedNormBase = parsedCandidate.parsedTitleInfo?.normalizedBase || '';
+
+    if (spotNormBase === candNormBase || (candParsedNormBase && spotNormBase === candParsedNormBase)) {
+        reasons.push('exact_title_match');
+        return 1.0;
+    }
+
+    if (containsPhrase(parsedCandidate.rawTitle, spotifyTitleInfo.baseTitle) ||
+        (parsedCandidate.parsedSongTitle && containsPhrase(parsedCandidate.parsedSongTitle, spotifyTitleInfo.baseTitle))) {
+        reasons.push('phrase_title_match');
+        const tokenSim = Math.max(
+            tokenSimilarity(spotifyTitleInfo.baseTitle, parsedCandidate.parsedSongTitle || ''),
+            tokenSimilarity(spotifyTitleInfo.baseTitle, parsedCandidate.rawTitle)
+        );
+        return Math.max(0.88, tokenSim);
+    }
+
+    const simWithParsed = candParsedNormBase ? tokenSimilarity(spotNormBase, candParsedNormBase) : 0;
+    const simWithRaw = tokenSimilarity(spotNormBase, candNormBase);
+    const bestTokenSim = Math.max(simWithParsed, simWithRaw);
+
+    if (bestTokenSim >= 0.75) reasons.push('strong_title_token_match');
+    else if (bestTokenSim >= 0.50) reasons.push('moderate_title_token_match');
+
+    return bestTokenSim;
+}
+
+function scoreArtist(spotifyArtists, parsedCandidate, reasons) {
+    const primaryNorm = spotifyArtists.normalizedPrimary;
+    const candUploader = normalizeArtistName(parsedCandidate.uploader);
+    const candParsedArtist = parsedCandidate.parsedArtist ? normalizeArtistName(parsedCandidate.parsedArtist) : '';
+    const candRawTitle = normalizeText(parsedCandidate.rawTitle);
+
+    let primaryMatch = false;
+    let featuredMatches = 0;
+
+    if (candUploader === primaryNorm ||
+        candParsedArtist === primaryNorm ||
+        containsPhrase(parsedCandidate.uploader, spotifyArtists.primary) ||
+        containsPhrase(parsedCandidate.parsedArtist || '', spotifyArtists.primary) ||
+        containsPhrase(candRawTitle, spotifyArtists.primary)) {
+        primaryMatch = true;
+        reasons.push('primary_artist_match');
+    }
+
+    for (const feat of spotifyArtists.featured) {
+        const featNorm = normalizeArtistName(feat);
+        if (candRawTitle.includes(featNorm) || candParsedArtist.includes(featNorm) || candUploader.includes(featNorm)) {
+            featuredMatches++;
+        }
+    }
+
+    if (spotifyArtists.featured.length > 0 && featuredMatches === spotifyArtists.featured.length) {
+        reasons.push('all_featured_artists_match');
+    }
+
+    if (primaryMatch) {
+        if (spotifyArtists.featured.length === 0) return 1.0;
+        return 0.85 + 0.15 * (featuredMatches / spotifyArtists.featured.length);
+    }
+
+    for (const feat of spotifyArtists.featured) {
+        if (candParsedArtist === normalizeArtistName(feat) || containsPhrase(parsedCandidate.uploader, feat)) {
+            if (containsPhrase(candRawTitle, spotifyArtists.primary)) {
+                reasons.push('artist_order_invariance_match');
+                return 0.95;
+            }
+        }
+    }
+
+    const candidateArtistText = [parsedCandidate.parsedArtist, parsedCandidate.uploader].filter(Boolean).join(' ');
+    const maxTokenScore = Math.max(
+        tokenSimilarity(spotifyArtists.raw, candidateArtistText),
+        tokenSimilarity(spotifyArtists.primary, candidateArtistText),
+        tokenSimilarity(spotifyArtists.primary, candRawTitle) * 0.8
+    );
+
+    if (maxTokenScore >= 0.70) reasons.push('artist_token_match');
+    return maxTokenScore;
+}
+
+function evaluateVersionCompatibility(spotVersion, candVersion, reasons) {
+    let bonusPenalty = 0;
+    let conflict = false;
+
+    if (!spotVersion.isRemix && candVersion.isRemix) {
+        bonusPenalty -= 0.60;
+        conflict = true;
+        reasons.push('unwanted_remix');
+    } else if (spotVersion.isRemix && !candVersion.isRemix) {
+        bonusPenalty -= 0.50;
+        conflict = true;
+        reasons.push('missing_remix');
+    } else if (spotVersion.isRemix && candVersion.isRemix) {
+        if (spotVersion.remixDetails && candVersion.remixDetails) {
+            const remixSim = tokenSimilarity(spotVersion.remixDetails, candVersion.remixDetails);
+            if (remixSim >= 0.5) {
+                bonusPenalty += 0.12;
+                reasons.push('remix_details_matched');
+            } else {
+                bonusPenalty -= 0.40;
+                conflict = true;
+                reasons.push('conflicting_remix_details');
+            }
+        } else {
+            bonusPenalty += 0.08;
+            reasons.push('remix_matched');
+        }
+    }
+
+    if (!spotVersion.isLive && candVersion.isLive) {
+        bonusPenalty -= 0.50;
+        conflict = true;
+        reasons.push('unwanted_live_recording');
+    } else if (spotVersion.isLive && !candVersion.isLive) {
+        bonusPenalty -= 0.40;
+        conflict = true;
+        reasons.push('missing_live_recording');
+    } else if (spotVersion.isLive && candVersion.isLive) {
+        bonusPenalty += 0.12;
+        reasons.push('live_recording_matched');
+    }
+
+    if (!spotVersion.isAcoustic && candVersion.isAcoustic) {
+        bonusPenalty -= 0.50;
+        conflict = true;
+        reasons.push('unwanted_acoustic_version');
+    } else if (spotVersion.isAcoustic && !candVersion.isAcoustic) {
+        bonusPenalty -= 0.40;
+        conflict = true;
+        reasons.push('missing_acoustic_version');
+    } else if (spotVersion.isAcoustic && candVersion.isAcoustic) {
+        bonusPenalty += 0.12;
+        reasons.push('acoustic_version_matched');
+    }
+
+    if (!spotVersion.isInstrumental && candVersion.isInstrumental) {
+        bonusPenalty -= 0.55;
+        conflict = true;
+        reasons.push('unwanted_instrumental');
+    }
+    if (!spotVersion.isKaraoke && candVersion.isKaraoke) {
+        bonusPenalty -= 0.55;
+        conflict = true;
+        reasons.push('unwanted_karaoke');
+    }
+
+    if (spotVersion.isRadioEdit && candVersion.isRadioEdit) {
+        bonusPenalty += 0.08;
+        reasons.push('radio_edit_matched');
+    }
+    if (spotVersion.isExtended && candVersion.isExtended) {
+        bonusPenalty += 0.08;
+        reasons.push('extended_mix_matched');
+    }
+
+    if (spotVersion.isRemastered && candVersion.isRemastered) {
+        bonusPenalty += 0.06;
+        reasons.push('remaster_matched');
+    } else if (!spotVersion.isRemastered && candVersion.isRemastered) {
+        bonusPenalty += 0.02;
+        reasons.push('remaster_audio_acceptable');
+    }
+
+    if (!spotVersion.isRemix && !spotVersion.isLive && !spotVersion.isAcoustic &&
+        !candVersion.isRemix && !candVersion.isLive && !candVersion.isAcoustic) {
+        bonusPenalty += 0.04;
+        reasons.push('studio_version_matched');
+    }
+
+    return { bonusPenalty, conflict };
+}
+
+function scoreSpotifyCandidate(track, candidate, options = {}) {
+    const threshold = options.threshold ?? 0.58;
+    const reasons = [];
+
+    const spotifyTitleInfo = extractVersionInfo(track?.title || '');
+    const spotifyArtists = parseArtists(track?.artist || '', track?.title || '');
+    const parsedCandidate = parseYouTubeCandidate(candidate);
+
+    const expectedDurationMs = Number(track?.durationMs) || null;
+    let durationScoreObj = null;
+    if (expectedDurationMs && parsedCandidate.duration) {
+        durationScoreObj = calculateDurationScore(expectedDurationMs, parsedCandidate.duration);
+        if (durationScoreObj.disqualified) {
+            reasons.push('duration_mismatch_disqualified');
+            return null;
+        }
+        if (durationScoreObj.diffSec <= 2) reasons.push('duration_exact');
+        else if (durationScoreObj.diffSec <= 5) reasons.push('duration_very_close');
+        else if (durationScoreObj.diffSec <= 10) reasons.push('duration_acceptable');
+    }
+
+    const titleScore = scoreTitle(spotifyTitleInfo, parsedCandidate, reasons);
+    const artistScore = scoreArtist(spotifyArtists, parsedCandidate, reasons);
+
+    if (titleScore < 0.38 || (artistScore < 0.15 && titleScore < 0.85)) return null;
+
+    const candVersion = parsedCandidate.titleInfo.version;
+    const { bonusPenalty: versionBonus, conflict: versionConflict } =
+        evaluateVersionCompatibility(spotifyTitleInfo.version, candVersion, reasons);
+
+    let sourceBonus = 0;
+    if (parsedCandidate.isTopicChannel || candVersion.isTopic) {
+        sourceBonus += 0.12;
+        reasons.push('topic_channel_official');
+    } else if (candVersion.isOfficialAudio) {
+        sourceBonus += 0.08;
+        reasons.push('official_audio_signal');
+    } else if (parsedCandidate.isVevoChannel || candVersion.isOfficialVideo) {
+        sourceBonus += 0.04;
+        reasons.push('official_video_signal');
+    }
+
+    let albumBonus = 0;
+    const expectedAlbum = String(track?.album || '').trim();
+    if (expectedAlbum && expectedAlbum.toLowerCase() !== 'spotify collection') {
+        const normAlbum = normalizeText(expectedAlbum);
+        if (parsedCandidate.album && normalizeText(parsedCandidate.album).includes(normAlbum)) {
+            albumBonus = 0.05;
+            reasons.push('album_exact_match');
+        } else if (containsPhrase(parsedCandidate.rawTitle, expectedAlbum)) {
+            albumBonus = 0.03;
+            reasons.push('album_title_match');
+        }
+    }
+
+    let yearBonus = 0;
+    const expectedYear = Number(track?.releaseYear);
+    if (expectedYear && Number.isSafeInteger(expectedYear)) {
+        if (parsedCandidate.rawTitle.includes(String(expectedYear)) ||
+            (candVersion.remasterYear && candVersion.remasterYear === expectedYear)) {
+            yearBonus = 0.03;
+            reasons.push('release_year_match');
+        }
+    }
+
+    let negativePenalties = 0;
+    if (candVersion.isReaction) { negativePenalties -= 0.70; reasons.push('penalty_reaction_video'); }
+    if (candVersion.isTutorial) { negativePenalties -= 0.70; reasons.push('penalty_tutorial_video'); }
+    if (candVersion.isAiCover) { negativePenalties -= 0.70; reasons.push('penalty_ai_cover'); }
+    if (candVersion.isCover && !spotifyTitleInfo.version.isCover) { negativePenalties -= 0.45; reasons.push('penalty_cover_song'); }
+    if (candVersion.isSlowedOrSpedUp) { negativePenalties -= 0.50; reasons.push('penalty_tempo_modified'); }
+    if (candVersion.isNightcore) { negativePenalties -= 0.50; reasons.push('penalty_nightcore'); }
+    if (candVersion.is8D || candVersion.isBassBoosted) { negativePenalties -= 0.40; reasons.push('penalty_audio_effects'); }
+    if (candVersion.isLyricVideo) { negativePenalties -= 0.05; reasons.push('lyric_video_slight_penalty'); }
+
+    const durationScore = durationScoreObj?.score ?? null;
+    const baseScore = durationScore === null
+        ? titleScore * 0.60 + artistScore * 0.40
+        : titleScore * 0.48 + artistScore * 0.32 + durationScore * 0.20;
+
+    let finalScore = baseScore + versionBonus + sourceBonus + albumBonus + yearBonus + negativePenalties;
+    finalScore = Math.max(0, Math.min(1, Math.round(finalScore * 1000) / 1000));
+
+    if (finalScore < threshold || (versionConflict && finalScore < 0.75)) return null;
+
+    let confidence = 'low';
+    const hasNegativeSignals = negativePenalties < -0.10;
+    if (finalScore >= 0.78 && titleScore >= 0.65 && artistScore >= 0.60 && !hasNegativeSignals &&
+        (durationScore === null || durationScore >= 0.70)) {
+        confidence = 'high';
+    } else if (finalScore >= threshold && titleScore >= 0.42 && artistScore >= 0.20) {
+        confidence = 'medium';
+    }
+
+    return {
+        confidence,
+        score: finalScore,
+        titleScore: Math.round(titleScore * 1000) / 1000,
+        artistScore: Math.round(artistScore * 1000) / 1000,
+        durationScore: durationScore !== null ? Math.round(durationScore * 1000) / 1000 : null,
+        durationDifference: durationScoreObj?.diffSec ?? null,
+        reasons,
+        matchedTitle: parsedCandidate.rawTitle,
+        matchedArtist: parsedCandidate.parsedArtist || parsedCandidate.uploader,
+        videoId: parsedCandidate.id
+    };
+}
+
+function generateSearchQueries(track, maxSearches = 2) {
+    const titleInfo = extractVersionInfo(track?.title || '');
+    const artists = parseArtists(track?.artist || '', track?.title || '');
+    const primary = artists.primary === 'Unknown Artist' ? '' : artists.primary;
+    const cleanTitle = titleInfo.cleanTitle;
+
+    const queries = [];
+    const seen = new Set();
+    function addQuery(str) {
+        if (!str) return;
+        const cleaned = str.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
+        const lower = cleaned.toLowerCase();
+        if (cleaned && !seen.has(lower)) {
+            seen.add(lower);
+            queries.push(cleaned);
+        }
+    }
+
+    addQuery([primary, cleanTitle].filter(Boolean).join(' '));
+
+    if (titleInfo.version.isLive) {
+        addQuery([primary, titleInfo.baseTitle, 'live'].filter(Boolean).join(' '));
+    } else if (titleInfo.version.isAcoustic) {
+        addQuery([primary, titleInfo.baseTitle, 'acoustic'].filter(Boolean).join(' '));
+    } else if (titleInfo.version.isRemix) {
+        addQuery([primary, titleInfo.baseTitle, 'remix'].filter(Boolean).join(' '));
+    } else {
+        addQuery([primary, titleInfo.baseTitle, 'official audio'].filter(Boolean).join(' '));
+    }
+
+    addQuery([primary, cleanTitle, 'topic'].filter(Boolean).join(' '));
+
+    if (artists.featured.length > 0) {
+        addQuery([artists.all.join(' '), cleanTitle].filter(Boolean).join(' '));
+    }
+
+    return queries.slice(0, maxSearches);
+}
+
+function rankCandidates(track, candidates, options = {}) {
+    if (!Array.isArray(candidates) || candidates.length === 0) return [];
+    const evaluated = [];
+    const seenIds = new Set();
+
+    for (const candidate of candidates) {
+        const videoId = String(candidate?.id || candidate?.url || '');
+        if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) continue;
+        if (seenIds.has(videoId)) continue;
+        seenIds.add(videoId);
+
+        const evaluation = scoreSpotifyCandidate(track, candidate, options);
+        if (evaluation) {
+            evaluated.push({
+                candidate,
+                videoId,
+                score: evaluation.score,
+                confidence: evaluation.confidence,
+                titleScore: evaluation.titleScore,
+                artistScore: evaluation.artistScore,
+                durationScore: evaluation.durationScore,
+                durationDifference: evaluation.durationDifference,
+                reasons: evaluation.reasons,
+                matchedTitle: evaluation.matchedTitle,
+                matchedArtist: evaluation.matchedArtist
+            });
+        }
+    }
+
+    evaluated.sort((a, b) => {
+        const scoreDiff = b.score - a.score;
+        if (Math.abs(scoreDiff) > 0.02) return scoreDiff;
+        const aHasTopic = a.reasons.includes('topic_channel_official');
+        const bHasTopic = b.reasons.includes('topic_channel_official');
+        if (aHasTopic !== bHasTopic) return aHasTopic ? -1 : 1;
+        const aHasAudio = a.reasons.includes('official_audio_signal');
+        const bHasAudio = b.reasons.includes('official_audio_signal');
+        if (aHasAudio !== bHasAudio) return aHasAudio ? -1 : 1;
+        return scoreDiff;
+    });
+
+    return evaluated;
+}
+
+async function searchYouTubeCandidates(query, maxCandidates, signal) {
+    const searchTarget = `ytsearch${maxCandidates}:${query}`;
     const args = [
         '--dump-single-json', '--flat-playlist', '--skip-download', '--no-warnings',
         '--extractor-args', 'youtube:player_client=android,web'
@@ -508,7 +1094,7 @@ async function findSpotifyMatch(track, signal) {
     if (COOKIES_PATH) args.push('--cookies', COOKIES_PATH);
     args.push('--', searchTarget);
 
-    const result = await new Promise((resolve, reject) => {
+    return new Promise((resolve, reject) => {
         if (signal?.aborted) return reject(new Error('Request cancelled.'));
         const ytdlp = spawn('yt-dlp', args);
         let output = '';
@@ -537,28 +1123,58 @@ async function findSpotifyMatch(track, signal) {
             if (signal?.aborted) return reject(new Error('Request cancelled.'));
             if (timedOut) return reject(new Error('Spotify match search timed out.'));
             if (outputBytes > 2 * 1024 * 1024) return reject(new Error('Spotify match search returned too much data.'));
-            if (code !== 0 || !output.trim()) return reject(new Error('No YouTube search results were found.'));
+            if (code !== 0 || !output.trim()) return resolve([]);
             try {
                 const data = JSON.parse(output);
                 resolve(Array.isArray(data.entries) ? data.entries : [data]);
             } catch {
-                reject(new Error('Unable to read YouTube search results.'));
+                resolve([]);
             }
         });
     });
-
-    const ranked = result.map(candidate => {
-        const videoId = String(candidate.id || candidate.url || '');
-        if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) return null;
-        const score = scoreSpotifyCandidate(track, candidate);
-        return score ? { candidate, videoId, score } : null;
-    }).filter(Boolean).sort((a, b) => b.score.confidence - a.score.confidence);
-
-    if (!ranked.length) throw new Error('No search result matched the Spotify title, artist, and duration closely enough.');
-    const best = ranked[0];
-    Logger.info(`[Spotify match] ${sanitizeAsciiHeader(track.title)} - ${sanitizeAsciiHeader(track.artist)} -> ${sanitizeAsciiHeader(best.candidate.title || '')} (confidence ${(best.score.confidence * 100).toFixed(0)}%)`);
-    return `https://www.youtube.com/watch?v=${best.videoId}`;
 }
+
+async function findSpotifyMatch(track, signal) {
+    // Spotify to YouTube matching configuration:
+    // Declared here for easy tuning without environment variables
+    const MATCH_THRESHOLD = 0.58;       // Minimum confidence score (0.0 - 1.0) required to accept a YouTube candidate
+    const MAX_SEARCH_QUERIES = 2;       // Maximum search query variations attempted per track
+    const MAX_CANDIDATES_PER_QUERY = 5; // Maximum YouTube candidates fetched per search query
+
+    const queries = generateSearchQueries(track, MAX_SEARCH_QUERIES);
+    const collectedCandidates = [];
+    const seenIds = new Set();
+    let bestCandidate = null;
+
+    for (let i = 0; i < queries.length; i++) {
+        const query = queries[i];
+        const entries = await searchYouTubeCandidates(query, MAX_CANDIDATES_PER_QUERY, signal);
+        for (const entry of entries) {
+            const id = entry?.id || entry?.url;
+            if (id && !seenIds.has(id)) {
+                seenIds.add(id);
+                collectedCandidates.push(entry);
+            }
+        }
+
+        const ranked = rankCandidates(track, collectedCandidates, { threshold: MATCH_THRESHOLD });
+        if (ranked.length > 0) {
+            bestCandidate = ranked[0];
+            if (bestCandidate.confidence === 'high' && bestCandidate.score >= 0.85) {
+                break;
+            }
+        }
+    }
+
+    if (!bestCandidate) {
+        throw new Error('No search result matched the Spotify title, artist, and duration closely enough.');
+    }
+
+    Logger.info(`[Spotify match] ${sanitizeAsciiHeader(track.title)} - ${sanitizeAsciiHeader(track.artist)} -> ${sanitizeAsciiHeader(bestCandidate.matchedTitle || '')} (confidence ${(bestCandidate.score * 100).toFixed(0)}%)`);
+    return `https://www.youtube.com/watch?v=${bestCandidate.videoId}`;
+}
+
+
 
 // clean up filenames so they do not break the filesystem
 function sanitizeFilename(name) {
@@ -855,9 +1471,14 @@ async function getSpotifyData(url, signal) {
                 const artistName = (entity?.artists && Array.isArray(entity.artists))
                     ? entity.artists.map(a => a.name).join(', ')
                     : 'Unknown Artist';
+                const albumName = entity?.album?.name || '';
+                const releaseDate = entity?.album?.release_date || entity?.release_date || '';
+                const releaseYear = releaseDate ? Number(String(releaseDate).slice(0, 4)) : null;
                 tracks.push({
                     title: safeMetadataText(entity?.name, 'Unknown Track'),
                     artist: safeMetadataText(artistName, 'Unknown Artist'),
+                    album: safeMetadataText(albumName, ''),
+                    releaseYear: Number.isSafeInteger(releaseYear) ? releaseYear : null,
                     thumbnail: coverImage,
                     durationMs: getSpotifyDurationMs(entity)
                 });
@@ -876,9 +1497,14 @@ async function getSpotifyData(url, signal) {
                             // Embed trackList entries (playlists/albums) carry the artist(s) in `subtitle`.
                             trackArtists = safeMetadataText(trackData.subtitle.replace(/\u00a0/g, ' '), 'Unknown Artist');
                         }
+                        const albumName = trackData.album?.name || (type === 'album' ? collectionName : '');
+                        const releaseDate = trackData.album?.release_date || '';
+                        const releaseYear = releaseDate ? Number(String(releaseDate).slice(0, 4)) : null;
                         tracks.push({
                             title,
                             artist: trackArtists,
+                            album: safeMetadataText(albumName, ''),
+                            releaseYear: Number.isSafeInteger(releaseYear) ? releaseYear : null,
                             thumbnail: coverImage,
                             durationMs: getSpotifyDurationMs(trackData)
                         });
