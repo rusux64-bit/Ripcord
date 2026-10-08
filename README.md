@@ -21,7 +21,7 @@ Supported formats: MP3, M4A, FLAC, WAV, and OGG.
 
 - **Metadata Resolution**: Scrapes embed schemas for Spotify tracks and playlists; queries YouTube oEmbed and `yt-dlp --flat-playlist` to discover tracklists without full downloads.
 - **Audio Extraction**: Spawns `yt-dlp` with strict process boundaries (`--`) to stream source audio directly to standard output without downloading video files.
-- **Spotify Matching**: Because Spotify does not expose raw audio, Ripcord ranks multiple YouTube search results by title, artist, and track duration, then downloads the best result only when it clears a confidence threshold.
+- **Spotify Matching**: Because Spotify does not expose raw audio, Ripcord normalizes metadata (primary and featured artists, version tags such as remixes, live recordings, and acoustic edits), generates targeted YouTube search queries, and deterministically scores candidates across title similarity, artist credits, smooth duration curves, version compatibility, and official/Topic channel signals. If no candidate clears the confidence threshold, the track is safely rejected to prevent downloading incorrect audio.
 - **Transcoding & Tagging**: Pipes raw audio through FFmpeg to encode the selected format, embeds ID3v2/Vorbis tags, and applies high-resolution cover art fetched from CDNs.
 - **Streamed Output**: Single tracks stream directly over HTTP. Multi-track collections are transcoded in bounded concurrent batches and piped straight into an `archiver` ZIP stream, using minimal server disk space.
 
