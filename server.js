@@ -597,6 +597,11 @@ function getYouTubeVideoId(url) {
         let id = null;
         if (host === 'youtu.be') id = parsed.pathname.slice(1);
         else if (parsed.pathname === '/watch') id = parsed.searchParams.get('v');
+        else if (parsed.pathname === '/playlist') {
+            const list = parsed.searchParams.get('list');
+            const match = list?.match(/^RD(?:AMVM|MM)?([A-Za-z0-9_-]{11})$/i);
+            if (match) id = match[1];
+        }
         else id = parsed.pathname.match(/^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})\/?$/)?.[1] || null;
         return /^[A-Za-z0-9_-]{11}$/.test(id || '') ? id : null;
     } catch (e) {
@@ -613,10 +618,50 @@ function isYouTubeUrl(url) {
     }
 }
 
+function normalizeYouTubeUrl(url) {
+    try {
+        const parsed = new URL(url);
+        const host = parsed.hostname.toLowerCase();
+        if (!YOUTUBE_HOSTS.has(host)) return url;
+
+        const list = parsed.searchParams.get('list');
+        const isRadio = (list && list.toUpperCase().startsWith('RD')) ||
+            (list && list.toUpperCase().startsWith('UL')) ||
+            parsed.searchParams.get('start_radio') === '1';
+
+        if (isRadio) {
+            parsed.searchParams.delete('list');
+            parsed.searchParams.delete('start_radio');
+            parsed.searchParams.delete('index');
+
+            if (parsed.pathname === '/playlist' && list) {
+                const match = list.match(/^RD(?:AMVM|MM)?([A-Za-z0-9_-]{11})$/i);
+                if (match) {
+                    parsed.pathname = '/watch';
+                    parsed.searchParams.set('v', match[1]);
+                }
+            }
+        }
+        return parsed.href;
+    } catch {
+        return url;
+    }
+}
+
 function isYouTubePlaylist(url) {
     try {
         const parsed = new URL(url);
-        return YOUTUBE_HOSTS.has(parsed.hostname.toLowerCase()) && (parsed.pathname === '/playlist' || parsed.searchParams.has('list'));
+        if (!YOUTUBE_HOSTS.has(parsed.hostname.toLowerCase())) return false;
+
+        const list = parsed.searchParams.get('list');
+        if (!list && parsed.pathname !== '/playlist') return false;
+
+        // Auto-generated YouTube Mixes / Radios (starting with RD or UL) are dynamic recommendation feeds, not downloadable static playlists.
+        if (list && (list.toUpperCase().startsWith('RD') || list.toUpperCase().startsWith('UL') || parsed.searchParams.get('start_radio') === '1')) {
+            return false;
+        }
+
+        return parsed.pathname === '/playlist' || Boolean(list);
     } catch (e) {
         return false;
     }
@@ -1420,7 +1465,7 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
         }
         const parsedUrl = new URL(rawUrl);
         parsedUrl.hash = '';
-        const url = parsedUrl.href;
+        const url = normalizeYouTubeUrl(parsedUrl.href);
         const controller = new AbortController();
         let metadataAcquisition = null;
         res.once('close', () => {
@@ -1430,7 +1475,11 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
             }
         });
 
-        Logger.info(`Metadata requested from ${parsedUrl.hostname}`);
+        Logger.info(`Metadata requested from ${new URL(url).hostname}`);
+
+        if (isYouTubeUrl(url) && !isYouTubePlaylist(url) && !getYouTubeVideoId(url)) {
+            return res.status(400).json({ error: 'YouTube Mix/Radio playlists are dynamic and cannot be downloaded as collections. Please link a specific track or curated playlist.' });
+        }
 
         if (isYouTubePlaylist(url)) {
             metadataAcquisition = metadataSemaphore.tryAcquire();
@@ -1514,12 +1563,13 @@ app.get('/api/download', rejectCrossSiteRequests, (req, res) => {
 
     const parsedUrl = new URL(rawUrl);
     parsedUrl.hash = '';
+    const url = normalizeYouTubeUrl(parsedUrl.href);
     const safeFilename = sanitizeFilename(filename);
 
     const jobId = typeof req.query.job === 'string' && JOB_ID_PATTERN.test(req.query.job) ? req.query.job : null;
 
     const accepted = downloadQueue.addTask(
-        signal => executeDownloadTask(parsedUrl.href, audioBitrate, audioFormat, safeFilename, res, signal, jobId),
+        signal => executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId),
         res
     );
     if (!accepted) {
@@ -1602,4 +1652,4 @@ if (require.main === module) {
     server.keepAliveTimeout = 5000;
 }
 
-module.exports = { app, isSafeUrl, MetadataSemaphore };
+module.exports = { app, isSafeUrl, normalizeYouTubeUrl, isYouTubePlaylist, MetadataSemaphore };

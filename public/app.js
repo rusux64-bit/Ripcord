@@ -126,7 +126,7 @@ function tidyTitle(title) {
 }
 
 function normaliseUrl(raw) {
-    let value = raw.trim();
+    let value = (raw || '').trim();
     if (!value) return null;
     if (!/^https?:\/\//i.test(value)) value = 'https://' + value;
     let parsed;
@@ -138,7 +138,30 @@ function normaliseUrl(raw) {
     const host = parsed.hostname.replace(/^www\./, '');
     const ok = ['youtube.com', 'music.youtube.com', 'm.youtube.com', 'youtu.be', 'open.spotify.com', 'spotify.com']
         .some(h => host === h || host.endsWith('.' + h));
-    return ok ? parsed.href : null;
+    if (!ok) return null;
+
+    if (['youtube.com', 'music.youtube.com', 'm.youtube.com', 'youtu.be'].some(h => host === h || host.endsWith('.' + h))) {
+        const list = parsed.searchParams.get('list');
+        const isRadio = (list && list.toUpperCase().startsWith('RD')) ||
+            (list && list.toUpperCase().startsWith('UL')) ||
+            parsed.searchParams.get('start_radio') === '1';
+
+        if (isRadio) {
+            parsed.searchParams.delete('list');
+            parsed.searchParams.delete('start_radio');
+            parsed.searchParams.delete('index');
+
+            if (parsed.pathname === '/playlist' && list) {
+                const match = list.match(/^RD(?:AMVM|MM)?([A-Za-z0-9_-]{11})$/i);
+                if (match) {
+                    parsed.pathname = '/watch';
+                    parsed.searchParams.set('v', match[1]);
+                }
+            }
+        }
+    }
+
+    return parsed.href;
 }
 
 function coverSrc(url) {
@@ -320,7 +343,14 @@ el.snackbarClose.addEventListener('click', () => el.snackbar.classList.remove('s
 el.aboutBtn.addEventListener('click', () => el.about.showModal());
 el.aboutClose.addEventListener('click', () => el.about.close());
 el.about.addEventListener('click', event => {
-    if (event.target === el.about) el.about.close();
+    const rect = el.about.getBoundingClientRect();
+    const isInDialog = (
+        rect.top <= event.clientY &&
+        event.clientY <= rect.bottom &&
+        rect.left <= event.clientX &&
+        event.clientX <= rect.right
+    );
+    if (!isInDialog) el.about.close();
 });
 
 // spin the vinyl record cover while loading
@@ -468,6 +498,7 @@ async function submitUrl() {
         el.url.focus();
         return;
     }
+    el.url.value = url;
     setFieldError('');
     fetching = true;
     setFetching(true);
