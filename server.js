@@ -96,20 +96,6 @@ if (!Number.isSafeInteger(TRUST_PROXY_HOPS_VALUE) || TRUST_PROXY_HOPS_VALUE < 0 
 }
 const TRUST_PROXY_HOPS = TRUST_PROXY_HOPS_VALUE || false;
 
-function floatEnv(name, fallback, min = 0, max = 1) {
-    const raw = process.env[name];
-    if (raw === undefined || raw === '') return fallback;
-    const value = Number(raw);
-    if (!Number.isFinite(value) || value < min || value > max) {
-        throw new Error(`${name} must be a number between ${min} and ${max}.`);
-    }
-    return value;
-}
-
-const YOUTUBE_MATCH_THRESHOLD = floatEnv('YOUTUBE_MATCH_THRESHOLD', 0.58, 0.1, 1.0);
-const YOUTUBE_MATCH_MAX_SEARCHES = positiveIntegerEnv('YOUTUBE_MATCH_MAX_SEARCHES', 2, 4);
-const YOUTUBE_MATCH_MAX_CANDIDATES = positiveIntegerEnv('YOUTUBE_MATCH_MAX_CANDIDATES', 5, 10);
-
 if (!ytdlpAvailable) {
     Logger.error('yt-dlp is not installed or not in PATH. Please install yt-dlp: https://github.com/yt-dlp/yt-dlp');
 }
@@ -909,7 +895,7 @@ function evaluateVersionCompatibility(spotVersion, candVersion, reasons) {
 }
 
 function scoreSpotifyCandidate(track, candidate, options = {}) {
-    const threshold = options.threshold ?? YOUTUBE_MATCH_THRESHOLD;
+    const threshold = options.threshold ?? 0.58;
     const reasons = [];
 
     const spotifyTitleInfo = extractVersionInfo(track?.title || '');
@@ -1016,7 +1002,7 @@ function scoreSpotifyCandidate(track, candidate, options = {}) {
     };
 }
 
-function generateSearchQueries(track, maxSearches = YOUTUBE_MATCH_MAX_SEARCHES) {
+function generateSearchQueries(track, maxSearches = 2) {
     const titleInfo = extractVersionInfo(track?.title || '');
     const artists = parseArtists(track?.artist || '', track?.title || '');
     const primary = artists.primary === 'Unknown Artist' ? '' : artists.primary;
@@ -1149,14 +1135,20 @@ async function searchYouTubeCandidates(query, maxCandidates, signal) {
 }
 
 async function findSpotifyMatch(track, signal) {
-    const queries = generateSearchQueries(track, YOUTUBE_MATCH_MAX_SEARCHES);
+    // Spotify to YouTube matching configuration:
+    // Declared here for easy tuning without environment variables
+    const MATCH_THRESHOLD = 0.58;       // Minimum confidence score (0.0 - 1.0) required to accept a YouTube candidate
+    const MAX_SEARCH_QUERIES = 2;       // Maximum search query variations attempted per track
+    const MAX_CANDIDATES_PER_QUERY = 5; // Maximum YouTube candidates fetched per search query
+
+    const queries = generateSearchQueries(track, MAX_SEARCH_QUERIES);
     const collectedCandidates = [];
     const seenIds = new Set();
     let bestCandidate = null;
 
     for (let i = 0; i < queries.length; i++) {
         const query = queries[i];
-        const entries = await searchYouTubeCandidates(query, YOUTUBE_MATCH_MAX_CANDIDATES, signal);
+        const entries = await searchYouTubeCandidates(query, MAX_CANDIDATES_PER_QUERY, signal);
         for (const entry of entries) {
             const id = entry?.id || entry?.url;
             if (id && !seenIds.has(id)) {
@@ -1165,7 +1157,7 @@ async function findSpotifyMatch(track, signal) {
             }
         }
 
-        const ranked = rankCandidates(track, collectedCandidates, { threshold: YOUTUBE_MATCH_THRESHOLD });
+        const ranked = rankCandidates(track, collectedCandidates, { threshold: MATCH_THRESHOLD });
         if (ranked.length > 0) {
             bestCandidate = ranked[0];
             if (bestCandidate.confidence === 'high' && bestCandidate.score >= 0.85) {
