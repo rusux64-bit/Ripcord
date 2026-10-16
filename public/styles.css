@@ -341,7 +341,7 @@ button {
   left: -14vw;
   top: -18vh;
   color: var(--md-sys-color-primary-container);
-  animation: drift-1 32s ease-in-out infinite;
+  animation: drift-1 32s linear infinite;
 }
 
 .blob--2 {
@@ -351,7 +351,7 @@ button {
   right: -12vw;
   top: 20vh;
   color: var(--md-sys-color-tertiary-container);
-  animation: drift-2 26s ease-in-out infinite -5s;
+  animation: drift-2 26s linear infinite -5s;
 }
 
 .blob--3 {
@@ -361,45 +361,60 @@ button {
   left: 28vw;
   bottom: -26vh;
   color: var(--md-sys-color-secondary-container);
-  animation: drift-3 36s ease-in-out infinite -10s;
+  animation: drift-3 36s linear infinite -10s;
 }
 
 @keyframes drift-1 {
-  0%, 100% {
+  0% {
     transform: translate3d(0, 0, 0) rotate(0deg) scale(1, 1);
   }
   25% {
-    transform: translate3d(2.5vw, -2vh, 0) rotate(85deg) scale(1.08, 0.94);
+    transform: translate3d(2.5vw, -2vh, 0) rotate(90deg) scale(1.06, 0.95);
   }
   50% {
-    transform: translate3d(-1.5vw, 2.5vh, 0) rotate(180deg) scale(0.95, 1.06);
+    transform: translate3d(-1.5vw, 2.5vh, 0) rotate(180deg) scale(0.95, 1.05);
   }
   75% {
-    transform: translate3d(2vw, 1.5vh, 0) rotate(265deg) scale(1.04, 0.96);
+    transform: translate3d(2vw, 1.5vh, 0) rotate(270deg) scale(1.04, 0.96);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) rotate(360deg) scale(1, 1);
   }
 }
 
 @keyframes drift-2 {
-  0%, 100% {
+  0% {
     transform: translate3d(0, 0, 0) rotate(0deg) scale(1, 1);
   }
-  33% {
-    transform: translate3d(-3vw, 2vh, 0) rotate(-110deg) scale(0.94, 1.08);
+  25% {
+    transform: translate3d(-2vw, 1.5vh, 0) rotate(-90deg) scale(0.95, 1.05);
   }
-  66% {
-    transform: translate3d(2vw, -2.5vh, 0) rotate(-230deg) scale(1.06, 0.95);
+  50% {
+    transform: translate3d(-3vw, 2vh, 0) rotate(-180deg) scale(1.05, 0.95);
+  }
+  75% {
+    transform: translate3d(2vw, -2.5vh, 0) rotate(-270deg) scale(0.96, 1.04);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) rotate(-360deg) scale(1, 1);
   }
 }
 
 @keyframes drift-3 {
-  0%, 100% {
+  0% {
     transform: translate3d(0, 0, 0) rotate(0deg) scale(1, 1);
   }
-  30% {
-    transform: translate3d(2vw, 2vh, 0) rotate(100deg) scale(1.05, 0.96);
+  25% {
+    transform: translate3d(1.5vw, 1.5vh, 0) rotate(90deg) scale(1.04, 0.96);
   }
-  70% {
-    transform: translate3d(-2.5vw, -1.5vh, 0) rotate(240deg) scale(0.96, 1.05);
+  50% {
+    transform: translate3d(2vw, 2vh, 0) rotate(180deg) scale(0.96, 1.05);
+  }
+  75% {
+    transform: translate3d(-2.5vw, -1.5vh, 0) rotate(270deg) scale(1.04, 0.96);
+  }
+  100% {
+    transform: translate3d(0, 0, 0) rotate(360deg) scale(1, 1);
   }
 }
 
@@ -762,15 +777,15 @@ button {
 
 /* 4. Background blobs ease in separately and subtly */
 :root.fonts-ready[data-intro] .blob--1 {
-  animation: drift-1 32s ease-in-out infinite, blob-ease-in calc(900ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(40ms * var(--intro-scale)) backwards;
+  animation: drift-1 32s linear infinite, blob-ease-in calc(900ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(40ms * var(--intro-scale)) backwards;
 }
 
 :root.fonts-ready[data-intro] .blob--2 {
-  animation: drift-2 26s ease-in-out infinite -5s, blob-ease-in calc(900ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(120ms * var(--intro-scale)) backwards;
+  animation: drift-2 26s linear infinite -5s, blob-ease-in calc(900ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(120ms * var(--intro-scale)) backwards;
 }
 
 :root.fonts-ready[data-intro] .blob--3 {
-  animation: drift-3 36s ease-in-out infinite -10s, blob-ease-in calc(900ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(200ms * var(--intro-scale)) backwards;
+  animation: drift-3 36s linear infinite -10s, blob-ease-in calc(900ms * var(--intro-scale)) cubic-bezier(0.22, 1, 0.36, 1) calc(200ms * var(--intro-scale)) backwards;
 }
 
 @keyframes stage-unfold {
