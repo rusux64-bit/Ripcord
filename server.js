@@ -1705,17 +1705,53 @@ async function searchYouTubeCandidates(query, maxCandidates, signal, logger = Lo
     });
 }
 
-async function findSpotifyMatch(track, signal, logger = Logger) {
-    // Spotify to YouTube matching configuration:
-    // Declared here for easy tuning without environment variables
-    const MATCH_THRESHOLD = 0.58;       // Minimum confidence score (0.0 - 1.0) required to accept a YouTube candidate
+// In-memory 24h LRU cache of age-restricted video IDs across jobs
+class AgeGateLruCache {
+    constructor(maxSize = 1000, ttlMs = 24 * 60 * 60 * 1000) {
+        this.maxSize = maxSize;
+        this.ttlMs = ttlMs;
+        this.cache = new Map(); // videoId -> timestamp
+    }
+
+    has(videoId) {
+        if (!videoId || !this.cache.has(videoId)) return false;
+        const entryTime = this.cache.get(videoId);
+        if (Date.now() - entryTime > this.ttlMs) {
+            this.cache.delete(videoId);
+            return false;
+        }
+        // Refresh position in Map for LRU order
+        this.cache.delete(videoId);
+        this.cache.set(videoId, entryTime);
+        return true;
+    }
+
+    add(videoId) {
+        if (!videoId) return;
+        if (this.cache.has(videoId)) {
+            this.cache.delete(videoId);
+        } else if (this.cache.size >= this.maxSize) {
+            const oldestKey = this.cache.keys().next().value;
+            if (oldestKey) this.cache.delete(oldestKey);
+        }
+        this.cache.set(videoId, Date.now());
+    }
+
+    clear() {
+        this.cache.clear();
+    }
+}
+
+const ageRestrictedCache = new AgeGateLruCache(1000, 24 * 60 * 60 * 1000);
+
+async function findSpotifyCandidates(track, signal, logger = Logger, excludedVideoIds = new Set()) {
+    const MATCH_THRESHOLD = 0.58;       // Minimum confidence score required
     const MAX_SEARCH_QUERIES = 2;       // Maximum search query variations attempted per track
     const MAX_CANDIDATES_PER_QUERY = 5; // Maximum YouTube candidates fetched per search query
 
     const queries = generateSearchQueries(track, MAX_SEARCH_QUERIES);
     const collectedCandidates = [];
     const seenIds = new Set();
-    let bestCandidate = null;
 
     for (let i = 0; i < queries.length; i++) {
         const query = queries[i];
@@ -1727,22 +1763,99 @@ async function findSpotifyMatch(track, signal, logger = Logger) {
                 collectedCandidates.push(entry);
             }
         }
+    }
 
-        const ranked = rankCandidates(track, collectedCandidates, { threshold: MATCH_THRESHOLD });
-        if (ranked.length > 0) {
-            bestCandidate = ranked[0];
-            if (bestCandidate.confidence === 'high' && bestCandidate.score >= 0.85) {
-                break;
+    const ranked = rankCandidates(track, collectedCandidates, { threshold: MATCH_THRESHOLD });
+
+    // Filter out candidates that are known to be age-restricted or failed in this job
+    const filtered = ranked.filter(c => {
+        if (!c.videoId) return false;
+        if (excludedVideoIds && excludedVideoIds.has(c.videoId)) return false;
+        if (ageRestrictedCache.has(c.videoId)) return false;
+        return true;
+    });
+
+    // Prefer auto-generated "Topic" audio uploads, then other candidates above threshold
+    filtered.sort((a, b) => {
+        const aIsTopic = a.reasons.includes('topic_channel_official') || String(a.candidate?.uploader || '').endsWith(' - Topic');
+        const bIsTopic = b.reasons.includes('topic_channel_official') || String(b.candidate?.uploader || '').endsWith(' - Topic');
+        if (aIsTopic !== bIsTopic) return aIsTopic ? -1 : 1;
+        return b.score - a.score;
+    });
+
+    return filtered;
+}
+
+async function findSpotifyMatch(track, signal, logger = Logger, excludedVideoIds = new Set()) {
+    const candidates = await findSpotifyCandidates(track, signal, logger, excludedVideoIds);
+    if (!candidates || candidates.length === 0) {
+        throw new AppError('NO_MATCH', { userMessage: 'No search result matched the Spotify title, artist, and duration closely enough.' });
+    }
+    const bestCandidate = candidates[0];
+    logger.info(`[Spotify match] ${sanitizeAsciiHeader(track.title)} - ${sanitizeAsciiHeader(track.artist)} -> ${sanitizeAsciiHeader(bestCandidate.matchedTitle || '')} (confidence ${(bestCandidate.score * 100).toFixed(0)}%)`);
+    return `https://www.youtube.com/watch?v=${bestCandidate.videoId}`;
+}
+
+async function downloadSpotifyAudioWithFallback({
+    track,
+    audioFormat,
+    signal,
+    onProgress,
+    logger = Logger,
+    jobExcludedVideoIds = new Set(),
+    onNote = null
+}) {
+    const candidates = await findSpotifyCandidates(track, signal, logger, jobExcludedVideoIds);
+    if (!candidates || candidates.length === 0) {
+        throw new AppError('NO_MATCH', { userMessage: 'No search result matched the Spotify title, artist, and duration closely enough.' });
+    }
+
+    const maxAttempts = Math.min(3, candidates.length);
+    let lastError = null;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        if (signal?.aborted) throw new AppError('CANCELLED');
+        const candidate = candidates[attempt];
+        const candidateUrl = `https://www.youtube.com/watch?v=${candidate.videoId}`;
+        const isAlternate = attempt > 0;
+
+        if (isAlternate) {
+            logger.info(`Spotify age-gate fallback: attempting candidate ${attempt + 1}/${maxAttempts} [${candidate.videoId}] "${sanitizeAsciiHeader(candidate.matchedTitle || '')}"`);
+        } else {
+            logger.info(`[Spotify match] ${sanitizeAsciiHeader(track.title)} - ${sanitizeAsciiHeader(track.artist)} -> ${sanitizeAsciiHeader(candidate.matchedTitle || '')} (confidence ${(candidate.score * 100).toFixed(0)}%)`);
+        }
+
+        try {
+            const tempAudioPath = await downloadToTemp(
+                candidateUrl,
+                audioFormat === 'm4a' ? 'm4a' : 'webm',
+                signal,
+                audioFormat,
+                onProgress,
+                logger
+            );
+
+            if (isAlternate) {
+                logger.info(`Spotify age-gate fallback: alternate candidate ${candidate.videoId} succeeded ("alternate version used")`);
+                onNote?.('alternate version used');
             }
+
+            return { tempAudioPath, candidate, alternateUsed: isAlternate };
+        } catch (err) {
+            lastError = err;
+            if (err?.code === 'AGE_RESTRICTED') {
+                logger.warn(`Spotify age-gate fallback: candidate ${candidate.videoId} failed with AGE_RESTRICTED. Adding to 24h cache and job excluded set.`);
+                ageRestrictedCache.add(candidate.videoId);
+                jobExcludedVideoIds?.add(candidate.videoId);
+                if (attempt + 1 < maxAttempts) {
+                    continue; // try next candidate
+                }
+            }
+            throw err;
         }
     }
 
-    if (!bestCandidate) {
-        throw new Error('No search result matched the Spotify title, artist, and duration closely enough.');
-    }
-
-    Logger.info(`[Spotify match] ${sanitizeAsciiHeader(track.title)} - ${sanitizeAsciiHeader(track.artist)} -> ${sanitizeAsciiHeader(bestCandidate.matchedTitle || '')} (confidence ${(bestCandidate.score * 100).toFixed(0)}%)`);
-    return `https://www.youtube.com/watch?v=${bestCandidate.videoId}`;
+    throw lastError || new AppError('AGE_RESTRICTED');
 }
 
 
@@ -2418,7 +2531,7 @@ async function injectVorbisCoverArt(filePath, imgPath, format, logger = Logger) 
 }
 
 // transcode the audio with ffmpeg and stream it directly to the user
-async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res, filename = '', artist = '', signal, req = null, logger = Logger) {
+async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res, filename = '', artist = '', signal, req = null, logger = Logger, isTempFile = false) {
     const tempFiles = [];
 
     // clean up temp files if the user closes their browser or cancels
@@ -2426,9 +2539,15 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
     res.on('close', onDisconnect);
 
     try {
-        logger.info('Downloading validated audio source');
-        const tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format, undefined, logger);
-        tempFiles.push(tempAudioPath);
+        let tempAudioPath;
+        if (isTempFile) {
+            tempAudioPath = target;
+            tempFiles.push(tempAudioPath);
+        } else {
+            logger.info('Downloading validated audio source');
+            tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format, undefined, logger);
+            tempFiles.push(tempAudioPath);
+        }
 
         let tempImgPath = '';
         const safeThumbnail = parseCoverUrl(thumbnailUrl);
@@ -2495,7 +2614,7 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
     }
 }
 
-async function downloadPlaylistTrack(track, index, audioFormat, signal, report = () => { }, logger = Logger) {
+async function downloadPlaylistTrack(track, index, audioFormat, signal, report = () => { }, logger = Logger, jobExcludedVideoIds = new Set()) {
     const trackLogger = logger.child({ trackIndex: index });
     const tempFiles = [];
 
@@ -2505,17 +2624,8 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal, report =
         const artist = String(track.artist || 'Unknown Artist').slice(0, 200);
         trackLogger.info(`Downloading track: ${sanitizeAsciiHeader(`${title} - ${artist}`)}`);
 
-        let downloadTarget;
-        if (track.url) {
-            if (!isSafeUrl(track.url)) throw new Error('Invalid playlist track URL.');
-            downloadTarget = track.url;
-        } else {
-            downloadTarget = await findSpotifyMatch({ ...track, title, artist }, signal, trackLogger);
-        }
-
-        report(index, { state: 'downloading', progress: 0 });
-        const downloadPromise = downloadToTemp(downloadTarget, audioFormat === 'm4a' ? 'm4a' : 'webm', signal, audioFormat,
-            fraction => report(index, { state: 'downloading', progress: fraction }), trackLogger);
+        let tempAudioPath;
+        let note = null;
         let tempImgPath = '';
         const safeThumbnail = parseCoverUrl(track.thumbnail);
 
@@ -2537,9 +2647,38 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal, report =
                 }).catch(() => { })
             : Promise.resolve();
 
-        const [tempAudioPath] = await Promise.all([downloadPromise, coverPromise]);
-        tempFiles.push(tempAudioPath);
-        return { track, index, title, artist, tempAudioPath, tempImgPath };
+        if (track.url) {
+            if (!isSafeUrl(track.url)) throw new Error('Invalid playlist track URL.');
+            report(index, { state: 'downloading', progress: 0 });
+            const downloadPromise = downloadToTemp(track.url, audioFormat === 'm4a' ? 'm4a' : 'webm', signal, audioFormat,
+                fraction => report(index, { state: 'downloading', progress: fraction }), trackLogger);
+            const [downloadResult] = await Promise.all([downloadPromise, coverPromise]);
+            tempAudioPath = downloadResult;
+            tempFiles.push(tempAudioPath);
+        } else {
+            // Spotify track: run candidate fallback
+            const downloadPromise = downloadSpotifyAudioWithFallback({
+                track: { ...track, title, artist },
+                audioFormat,
+                signal,
+                onProgress: fraction => report(index, { state: 'downloading', progress: fraction }),
+                logger: trackLogger,
+                jobExcludedVideoIds,
+                onNote: n => {
+                    note = n;
+                    report(index, { note: n });
+                }
+            });
+            const [downloadResult] = await Promise.all([downloadPromise, coverPromise]);
+            tempAudioPath = downloadResult.tempAudioPath;
+            tempFiles.push(tempAudioPath);
+            if (downloadResult.alternateUsed) {
+                note = 'alternate version used';
+                report(index, { note });
+            }
+        }
+
+        return { track, index, title, artist, tempAudioPath, tempImgPath, note };
     } catch (err) {
         const appErr = classifyError(err, err?.stderr || '');
         trackLogger.error(`Track failed: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - [${appErr.code}] ${appErr.message}`);
@@ -2596,6 +2735,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
     const taskLogger = (req?.logger || Logger).child({ jobId: jobId || randomUUID() });
     const jobStartTime = Date.now();
     let job = null;
+    const jobExcludedVideoIds = new Set();
 
     try {
         taskLogger.info(`Task started (${audioFormat.toUpperCase()})`);
@@ -2619,7 +2759,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             res.setHeader('Content-Type', mimeType);
             const info = await getYoutubeInfo(url, signal);
             const trackTitle = customTitle || info.title;
-            await processAndStreamAudio(url, audioBitrate, audioFormat, info.thumbnail, res, trackTitle, info.author, signal, req, taskLogger);
+            await processAndStreamAudio(url, audioBitrate, audioFormat, info.thumbnail, res, trackTitle, info.author, signal, req, taskLogger, false);
             return;
         }
 
@@ -2629,9 +2769,19 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             res.setHeader('Content-Type', mimeType);
             const spotifyData = await getSpotifyData(url, signal);
             const track = spotifyData.tracks[0];
-            const matchUrl = await findSpotifyMatch(track, signal, taskLogger);
             const trackTitle = customTitle || track.title;
-            await processAndStreamAudio(matchUrl, audioBitrate, audioFormat, track.thumbnail, res, trackTitle, track.artist, signal, req, taskLogger);
+            const downloaded = await downloadSpotifyAudioWithFallback({
+                track,
+                audioFormat,
+                signal,
+                onProgress: undefined,
+                logger: taskLogger,
+                jobExcludedVideoIds,
+                onNote: (note) => {
+                    res.setHeader('X-Ripcord-Note', note);
+                }
+            });
+            await processAndStreamAudio(downloaded.tempAudioPath, audioBitrate, audioFormat, track.thumbnail, res, trackTitle, track.artist, signal, req, taskLogger, true);
             return;
         }
 
@@ -2699,7 +2849,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                     while (!signal.aborted) {
                         const index = nextTrack++;
                         if (index >= tracks.length) return;
-                        const downloaded = await downloadPlaylistTrack(tracks[index], index, audioFormat, signal, report, taskLogger);
+                        const downloaded = await downloadPlaylistTrack(tracks[index], index, audioFormat, signal, report, taskLogger, jobExcludedVideoIds);
                         if (!downloaded) continue;
                         try {
                             await handoffQueue.push(downloaded);
@@ -3078,5 +3228,9 @@ module.exports = {
     sendError,
     StructuredLogger,
     Logger,
-    redactLog
+    redactLog,
+    AgeGateLruCache,
+    ageRestrictedCache,
+    findSpotifyCandidates,
+    downloadSpotifyAudioWithFallback
 };

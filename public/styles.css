@@ -2097,6 +2097,20 @@ body[data-stage="working"] .media {
   color: var(--md-sys-color-on-surface-variant);
 }
 
+.track__note {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1.1;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface-variant);
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+}
+
 .track__status {
   display: flex;
   align-items: center;

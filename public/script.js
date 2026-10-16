@@ -1370,7 +1370,10 @@ function startDownload(ageConfirmed = false) {
         if (xhr.status >= 200 && xhr.status < 300) {
             setProgress(1);
             state.blob = xhr.response;
-            state.blobName = saveName;
+            const noteHeader = xhr.getResponseHeader('X-Ripcord-Note');
+            if (noteHeader) {
+                logClientEvent('api', `Server note: ${noteHeader}`);
+            }
             logClientEvent('api', 'Download completed successfully', { status: xhr.status, size: state.blob.size });
             saveBlob();
             finish(isCollection);
@@ -1490,7 +1493,7 @@ function renderTrackList(tracks) {
         status.className = 'track__status';
         li.append(num, text, status);
         fragment.append(li);
-        const row = { li, status, key: '' };
+        const row = { li, text, status, key: '' };
         state.rows.push(row);
         updateTrackRow(row, { state: 'queued', progress: 0 });
     });
@@ -1502,10 +1505,23 @@ function updateTrackRow(row, track) {
     const pct = Math.round((Number(track.progress) || 0) * 100);
     const determinate = track.state === 'downloading' && pct > 0;
     const failureReason = track.state === 'failed' ? formatTrackFailure(track.code, track.error) : '';
-    const key = `${track.state}:${determinate ? pct : ''}:${failureReason}`;
+    const note = track.note || '';
+    const key = `${track.state}:${determinate ? pct : ''}:${failureReason}:${note}`;
     if (row.key === key) return;
     row.key = key;
     row.li.dataset.state = track.state in TRACK_STATES ? track.state : 'queued';
+
+    if (note && !row.li.querySelector('.track__note')) {
+        const noteBadge = document.createElement('span');
+        noteBadge.className = 'track__note';
+        noteBadge.textContent = note === 'alternate version used' ? 'alternate version' : note;
+        const sub = row.text ? row.text.querySelector('.track__sub') : null;
+        if (sub) {
+            sub.append(' · ', noteBadge);
+        } else if (row.text) {
+            row.text.append(noteBadge);
+        }
+    }
 
     const label = document.createElement('span');
     if (track.state === 'failed') {
