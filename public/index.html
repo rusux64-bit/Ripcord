@@ -143,6 +143,15 @@
 
                 <div class="screen" id="screen-options">
                     <div class="stack">
+                        <div class="callout playlist-callout" id="playlist-callout" hidden>
+                            <span class="icon callout__icon" aria-hidden="true">library_music</span>
+                            <div class="playlist-callout__body">
+                                <span class="playlist-callout__text" id="playlist-callout-text">This track is part of a playlist.</span>
+                                <span class="playlist-callout__cap" id="playlist-callout-cap" hidden>Playlists are capped at up to 30 tracks.</span>
+                            </div>
+                            <button class="btn btn--tonal btn--sm" id="playlist-toggle-btn" type="button">Use the whole playlist</button>
+                        </div>
+
                         <fieldset class="group">
                             <legend class="label">Format</legend>
                             <div class="segmented" role="presentation" id="format-group">

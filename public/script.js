@@ -132,11 +132,18 @@ const el = {
     doneSkippedToggle: $('#done-skipped-toggle'),
     doneSkippedToggleText: $('#done-skipped-toggle-text'),
     doneSkippedPanel: $('#done-skipped-panel'),
-    doneSkippedList: $('#done-skipped-list')
+    doneSkippedList: $('#done-skipped-list'),
+    screenOptions: $('#screen-options'),
+    playlistCallout: $('#playlist-callout'),
+    playlistCalloutText: $('#playlist-callout-text'),
+    playlistCalloutCap: $('#playlist-callout-cap'),
+    playlistToggleBtn: $('#playlist-toggle-btn')
 };
 
 const state = {
     stage: 'input',
+    mode: 'track',
+    playlistContext: null,
     info: null,
     url: '',
     xhr: null,
@@ -286,6 +293,59 @@ function extractSingleVideoId(parsed) {
     else if (parsed.pathname === '/watch') id = parsed.searchParams.get('v');
     else id = parsed.pathname.match(/^\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{11})\/?$/)?.[1] || null;
     return /^[A-Za-z0-9_-]{11}$/.test(id || '') ? id : null;
+}
+
+function detectYouTubePlaylistContext(raw) {
+    let value = (raw || '').trim();
+    if (!value) return null;
+    if (!/^https?:\/\//i.test(value)) value = 'https://' + value;
+    let parsed;
+    try {
+        parsed = new URL(value);
+    } catch {
+        return null;
+    }
+
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+    const isYouTube = ['youtube.com', 'music.youtube.com', 'm.youtube.com', 'youtu.be']
+        .some(h => host === h || host.endsWith('.' + h));
+    if (!isYouTube) {
+        return null;
+    }
+
+    const videoId = extractSingleVideoId(parsed);
+    if (!videoId) {
+        return null;
+    }
+
+    const list = parsed.searchParams.get('list');
+    const startRadio = parsed.searchParams.get('start_radio') === '1';
+
+    if (!list) {
+        return null;
+    }
+
+    const isMix = list.toUpperCase().startsWith('RD') || list.toUpperCase().startsWith('UL') || startRadio;
+    if (isMix) {
+        return {
+            playlistId: null,
+            isMix: true,
+            singleTrackUrl: `https://${parsed.hostname}/watch?v=${videoId}`,
+            playlistUrl: null,
+            host: parsed.hostname
+        };
+    }
+
+    const playlistHost = parsed.hostname === 'youtu.be' ? 'www.youtube.com' : parsed.hostname;
+    return {
+        playlistId: list,
+        isMix: false,
+        singleTrackUrl: parsed.hostname === 'youtu.be'
+            ? `https://youtu.be/${videoId}`
+            : `https://${parsed.hostname}/watch?v=${videoId}`,
+        playlistUrl: `https://${playlistHost}/playlist?list=${list}`,
+        host: parsed.hostname
+    };
 }
 
 function normaliseUrl(raw) {
@@ -1063,12 +1123,17 @@ function setFetching(on) {
     el.fetchLabel.textContent = on ? 'Looking it up' : 'Continue';
 }
 
+let fetchController = null;
+let fetchRequestId = 0;
 let fetching = false;
+
 async function submitUrl(ageConfirmed = false) {
     if (fetching) return;
-    const url = normaliseUrl(el.url.value);
+    const rawVal = el.url.value;
+    const playlistCtx = detectYouTubePlaylistContext(rawVal);
+    const url = normaliseUrl(rawVal);
     if (!url) {
-        const msg = el.url.value.trim()
+        const msg = rawVal.trim()
             ? 'That does not look like a Spotify or YouTube link.'
             : 'Paste a link first.';
         setFieldError(msg);
@@ -1076,6 +1141,15 @@ async function submitUrl(ageConfirmed = false) {
         el.url.focus();
         return;
     }
+    state.playlistContext = playlistCtx;
+    state.mode = 'track';
+
+    if (fetchController) {
+        fetchController.abort();
+    }
+    fetchController = new AbortController();
+    const fetchId = ++fetchRequestId;
+
     el.url.value = url;
     setFieldError('');
     clearErrorBanner('input');
@@ -1085,7 +1159,10 @@ async function submitUrl(ageConfirmed = false) {
     try {
         const params = new URLSearchParams({ url });
         if (ageConfirmed) params.set('ageConfirmed', '1');
-        const res = await fetch(`/api/fetch-info?${params.toString()}`);
+        const res = await fetch(`/api/fetch-info?${params.toString()}`, {
+            signal: fetchController.signal
+        });
+        if (fetchId !== fetchRequestId) return;
         const requestId = res.headers.get('x-request-id') || '';
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw normalizeError(data, res.status, requestId);
@@ -1093,17 +1170,21 @@ async function submitUrl(ageConfirmed = false) {
         state.url = data.url || url;
         el.url.value = state.url;
         state.info = data;
+        state.mode = data.type === 'collection' ? 'playlist' : 'track';
         showOptions();
         remember(state.url, data);
     } catch (err) {
+        if (fetchId !== fetchRequestId || err.name === 'AbortError') return;
         logClientEvent('error', `Metadata fetch failed: [${err.code || 'UNKNOWN'}] ${err.message}`, {
             code: err.code,
             requestId: err.requestId
         });
         showErrorBanner('input', err, () => submitUrl(false), () => submitUrl(true));
     } finally {
-        fetching = false;
-        setFetching(false);
+        if (fetchId === fetchRequestId) {
+            fetching = false;
+            setFetching(false);
+        }
     }
 }
 
@@ -1266,13 +1347,13 @@ el.filename.addEventListener('input', () => { nameTouched = true; });
 
 function showOptions() {
     const info = state.info;
-    const isCollection = info.type === 'collection';
+    const isCollection = state.mode === 'playlist' || info.type === 'collection';
     const isSpotify = /spotify\.com/i.test(state.url);
 
     // fill in the title and cover art before showing the screen
     el.mediaTitle.textContent = info.title;
     el.mediaArtist.textContent = isCollection
-        ? `${info.trackCount} ${info.trackCount === 1 ? 'track' : 'tracks'}`
+        ? `${info.trackCount} ${info.trackCount === 1 ? 'track' : 'tracks'}${info.trackCount >= 30 ? ' (capped at 30)' : ''}`
         : (info.artist || '');
     el.badgeText.textContent = isCollection ? 'Collection' : 'Track';
     $('.icon', el.badge).textContent = isCollection ? 'library_music' : 'music_note';
@@ -1300,8 +1381,119 @@ function showOptions() {
         ? `Download ${info.trackCount} tracks as ZIP`
         : 'Download';
 
+    updatePlaylistCallout();
+
     go('options', 'forward');
 }
+
+function updatePlaylistCallout() {
+    if (!el.playlistCallout) return;
+    const ctx = state.playlistContext;
+    if (!ctx) {
+        el.playlistCallout.hidden = true;
+        return;
+    }
+
+    if (ctx.isMix) {
+        el.playlistCallout.hidden = false;
+        el.playlistCalloutText.textContent = 'Part of a YouTube Mix. Only this song will be downloaded.';
+        el.playlistCalloutCap.hidden = true;
+        el.playlistToggleBtn.hidden = true;
+        return;
+    }
+
+    if (ctx.playlistId) {
+        el.playlistCallout.hidden = false;
+        el.playlistToggleBtn.hidden = false;
+
+        if (state.mode === 'playlist') {
+            el.playlistCalloutText.textContent = 'Viewing full playlist.';
+            el.playlistCalloutCap.hidden = false;
+            el.playlistCalloutCap.textContent = 'Playlists are capped at up to 30 tracks.';
+            el.playlistToggleBtn.textContent = 'Just this track';
+        } else {
+            el.playlistCalloutText.textContent = 'This track is part of a playlist.';
+            el.playlistCalloutCap.hidden = true;
+            el.playlistToggleBtn.textContent = 'Use the whole playlist';
+        }
+        return;
+    }
+
+    el.playlistCallout.hidden = true;
+}
+
+let mediaSwitchController = null;
+let mediaSwitchId = 0;
+
+async function switchMediaMode(nextMode, targetUrl) {
+    if (fetching) return;
+
+    if (mediaSwitchController) {
+        mediaSwitchController.abort();
+    }
+    mediaSwitchController = new AbortController();
+    const switchId = ++mediaSwitchId;
+
+    fetching = true;
+    el.playlistToggleBtn.disabled = true;
+    el.playlistToggleBtn.textContent = 'Loading...';
+    el.screenOptions?.setAttribute('aria-busy', 'true');
+    clearErrorBanner('options');
+
+    logClientEvent('action', `Switching media mode to ${nextMode}`, { targetUrl });
+
+    try {
+        const res = await fetch(`/api/fetch-info?${new URLSearchParams({ url: targetUrl })}`, {
+            signal: mediaSwitchController.signal
+        });
+        if (switchId !== mediaSwitchId) return;
+
+        const requestId = res.headers.get('x-request-id') || '';
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw normalizeError(data, res.status, requestId);
+
+        state.mode = nextMode;
+        state.url = data.url || targetUrl;
+        el.url.value = state.url;
+        state.info = data;
+        nameTouched = false;
+
+        logClientEvent('api', `Switched mode to ${nextMode} successfully`, {
+            type: data.type,
+            trackCount: data.trackCount || 1,
+            requestId
+        });
+
+        showOptions();
+        remember(state.url, data);
+    } catch (err) {
+        if (switchId !== mediaSwitchId || err.name === 'AbortError') return;
+        logClientEvent('error', `Failed to switch mode to ${nextMode}: [${err.code || 'UNKNOWN'}] ${err.message}`, {
+            code: err.code,
+            requestId: err.requestId
+        });
+        showErrorBanner('options', err,
+            () => switchMediaMode(nextMode, targetUrl),
+            () => switchMediaMode(nextMode, targetUrl)
+        );
+    } finally {
+        if (switchId === mediaSwitchId) {
+            fetching = false;
+            el.playlistToggleBtn.disabled = false;
+            el.screenOptions?.removeAttribute('aria-busy');
+            updatePlaylistCallout();
+        }
+    }
+}
+
+el.playlistToggleBtn?.addEventListener('click', () => {
+    if (!state.playlistContext || !state.playlistContext.playlistId) return;
+    const nextMode = state.mode === 'track' ? 'playlist' : 'track';
+    const targetUrl = nextMode === 'playlist'
+        ? state.playlistContext.playlistUrl
+        : state.playlistContext.singleTrackUrl;
+    switchMediaMode(nextMode, targetUrl);
+});
 
 el.backBtn.addEventListener('click', () => {
     resetSeed();

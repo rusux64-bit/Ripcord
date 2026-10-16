@@ -1568,6 +1568,39 @@ body[data-stage="working"] .media {
   display: none;
 }
 
+.playlist-callout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.playlist-callout[hidden] {
+  display: none;
+}
+
+.playlist-callout__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 180px;
+}
+
+.playlist-callout__text {
+  font-weight: 500;
+}
+
+.playlist-callout__cap {
+  font-size: 0.75rem;
+  color: var(--md-sys-color-on-tertiary-container);
+  opacity: 0.85;
+}
+
+.playlist-callout .btn {
+  flex-shrink: 0;
+}
+
 /* error banner */
 
 .error-banner {
