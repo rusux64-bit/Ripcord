@@ -790,29 +790,77 @@ function refreshName() {
     if (!nameTouched) el.filename.value = suggestedName();
 }
 
+function crossfadeText(elem, newText) {
+    if (!elem || elem.textContent === newText) return;
+    if (reduceMotion.matches) {
+        elem.textContent = newText;
+        return;
+    }
+    elem.style.opacity = '0.2';
+    requestAnimationFrame(() => {
+        elem.textContent = newText;
+        elem.style.opacity = '1';
+    });
+}
+
+function updateSegmented(seg) {
+    if (!seg) return;
+    const checked = seg.querySelector('input:checked');
+    if (!checked) return;
+    const label = checked.closest('label');
+    if (!label) return;
+    const segRect = seg.getBoundingClientRect();
+    const labelRect = label.getBoundingClientRect();
+    if (segRect.width === 0) return;
+    const left = labelRect.left - segRect.left;
+    const width = labelRect.width;
+    seg.style.setProperty('--indicator-left', `${left}px`);
+    seg.style.setProperty('--indicator-width', `${width}px`);
+    seg.style.setProperty('--indicator-opacity', '1');
+    seg.dataset.ready = 'true';
+}
+
+function updateAllSegmented() {
+    $$('.segmented').forEach(updateSegmented);
+}
+
+if (typeof ResizeObserver !== 'undefined') {
+    const segObserver = new ResizeObserver(entries => {
+        for (const entry of entries) updateSegmented(entry.target);
+    });
+    $$('.segmented').forEach(s => segObserver.observe(s));
+}
+window.addEventListener('resize', updateAllSegmented);
+if (document.fonts) document.fonts.ready.then(updateAllSegmented);
+
 function refreshFormat() {
     const fmt = currentFormat();
     const lossless = LOSSLESS.has(fmt);
     el.ext.textContent = `.${fmt}`;
-    el.formatHint.textContent = FORMAT_HINTS[fmt];
+    crossfadeText(el.formatHint, FORMAT_HINTS[fmt]);
     el.qualityGroup.dataset.collapsed = String(lossless);
     el.qualityGroup.inert = lossless;
     el.qualityGroup.setAttribute('aria-hidden', String(lossless));
     el.bitrate.disabled = lossless;
-    el.bitrateOut.textContent = lossless ? 'Lossless' : `${BITRATES[el.bitrate.value]} kbps`;
+    crossfadeText(el.bitrateOut, lossless ? 'Lossless' : `${BITRATES[el.bitrate.value]} kbps`);
+    updateSegmented($('#format-group'));
 }
 
 function refreshSlider() {
     const pct = (el.bitrate.value / (el.bitrate.max - el.bitrate.min)) * 100;
     el.bitrate.parentElement.style.setProperty('--slider-position', `${pct}%`);
-    el.bitrateOut.textContent = LOSSLESS.has(currentFormat()) ? 'Lossless' : `${BITRATES[el.bitrate.value]} kbps`;
+    crossfadeText(el.bitrateOut, LOSSLESS.has(currentFormat()) ? 'Lossless' : `${BITRATES[el.bitrate.value]} kbps`);
 }
 
 $$('input[name="format"]').forEach(i => {
     i.addEventListener('change', refreshFormat);
     i.addEventListener('input', refreshFormat);
 });
-$$('input[name="namestyle"]').forEach(i => i.addEventListener('change', () => { nameTouched = false; refreshName(); }));
+$$('input[name="namestyle"]').forEach(i => i.addEventListener('change', () => {
+    nameTouched = false;
+    refreshName();
+    updateSegmented($('#name-style'));
+}));
 el.clean.addEventListener('change', () => { nameTouched = false; refreshName(); });
 el.bitrate.addEventListener('input', refreshSlider);
 el.filename.addEventListener('input', () => { nameTouched = true; });
@@ -847,6 +895,7 @@ function showOptions() {
     refreshName();
     refreshFormat();
     refreshSlider();
+    requestAnimationFrame(() => updateAllSegmented());
 
     el.downloadLabel.textContent = isCollection
         ? `Download ${info.trackCount} tracks as ZIP`

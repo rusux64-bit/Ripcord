@@ -554,11 +554,13 @@ button {
   color: var(--md-sys-color-on-surface-variant);
   cursor: pointer;
   text-decoration: none;
-  transition: border-radius 0.5s var(--spring-spatial);
+  transition: border-radius 0.35s var(--spring-spatial),
+              transform 0.35s var(--spring-spatial);
 }
 
-.icon-btn:active {
-  border-radius: 16px;
+.icon-btn:active:not(:disabled) {
+  border-radius: 14px;
+  transform: scale(0.95);
 }
 
 /* button styles */
@@ -566,6 +568,7 @@ button {
 .btn {
   --h: 48px;
   --r: calc(var(--h) / 2);
+  --r-pressed: 12px;
   position: relative;
   isolation: isolate;
   overflow: hidden;
@@ -582,16 +585,20 @@ button {
   letter-spacing: 0.01em;
   text-decoration: none;
   cursor: pointer;
-  transition: border-radius 0.5s var(--spring-spatial), transform 0.5s var(--spring-spatial), opacity 0.2s;
+  transition: border-radius 0.35s var(--spring-spatial),
+              transform 0.35s var(--spring-spatial),
+              opacity 0.2s;
 }
 
-.btn:active {
-  border-radius: calc(var(--r) * 0.5);
+.btn:active:not(:disabled) {
+  border-radius: var(--r-pressed);
   transform: scale(0.97);
 }
 
 .btn--lg {
   --h: 56px;
+  --r: calc(var(--h) / 2);
+  --r-pressed: 16px;
   padding: 0 28px;
   font-size: 1rem;
 }
@@ -616,6 +623,31 @@ button {
 .btn[aria-busy="true"] {
   opacity: 0.55;
   pointer-events: none;
+}
+
+/* Button icon micro-motion */
+#fetch-btn .icon {
+  transition: transform 0.25s var(--spring-spatial);
+}
+
+#fetch-btn:hover:not(:disabled) .icon {
+  transform: translateX(4px);
+}
+
+#download-btn .icon {
+  transition: transform 0.2s var(--spring-spatial);
+}
+
+#download-btn:active:not(:disabled) .icon {
+  transform: translateY(3px);
+}
+
+#back-btn .icon {
+  transition: transform 0.25s var(--spring-spatial);
+}
+
+#back-btn:hover:not(:disabled) .icon {
+  transform: translateX(-4px);
 }
 
 /* main layout container */
@@ -938,9 +970,14 @@ body[data-stage="done"] #screen-done {
 }
 
 .value {
+  display: inline-block;
+  min-width: 76px;
+  text-align: right;
   font: 700 1rem/1 var(--font);
   font-variation-settings: "wdth" 110;
   color: var(--md-sys-color-primary);
+  font-variant-numeric: tabular-nums;
+  transition: opacity 0.2s var(--spring-effects);
 }
 
 /* album cover and track info header */
@@ -1139,22 +1176,49 @@ body[data-stage="working"] .media {
   font: 500 0.875rem/1 var(--mono);
 }
 
-/* audio format selector buttons */
+/* audio format selector buttons and connected button group */
 
 .segmented {
+  position: relative;
   display: flex;
   gap: 2px;
+  background: var(--md-sys-color-surface-container-highest);
+  border-radius: 24px;
+  padding: 0;
+  isolation: isolate;
+}
+
+.segmented::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--indicator-left, 0px);
+  width: var(--indicator-width, 0px);
+  border-radius: 24px;
+  background: var(--md-sys-color-primary);
+  opacity: var(--indicator-opacity, 0);
+  pointer-events: none;
+  z-index: 1;
+  transition: left 0.35s var(--spring-spatial),
+              width 0.35s var(--spring-spatial),
+              border-radius 0.35s var(--spring-spatial),
+              transform 0.25s var(--spring-spatial),
+              opacity 0.2s var(--spring-effects);
 }
 
 .segmented label {
   position: relative;
   flex: 1;
+  z-index: 2;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .segmented input {
   position: absolute;
   inset: 0;
-  z-index: 1;
+  z-index: 3;
   margin: 0;
   opacity: 0;
   cursor: pointer;
@@ -1165,11 +1229,14 @@ body[data-stage="working"] .media {
   place-items: center;
   height: 48px;
   border-radius: 8px;
-  background: var(--md-sys-color-surface-container-highest);
+  background: transparent;
   color: var(--md-sys-color-on-surface-variant);
   font: 700 0.875rem/1 var(--font);
   font-variation-settings: "wdth" 108;
-  transition: border-radius 0.5s var(--spring-spatial), background-color 0.25s, color 0.25s;
+  transform-origin: center center;
+  transition: color 0.25s var(--spring-effects),
+              transform 0.25s var(--spring-spatial),
+              border-radius 0.35s var(--spring-spatial);
 }
 
 .segmented label:first-child span {
@@ -1180,19 +1247,48 @@ body[data-stage="working"] .media {
   border-radius: 8px 24px 24px 8px;
 }
 
-.segmented label:hover span {
-  box-shadow: inset 0 0 0 100vmax color-mix(in srgb, currentColor 8%, transparent);
+/* Progressive enhancement: show active color before JS measures indicator */
+.segmented:not([data-ready="true"]) input:checked+span {
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
 }
 
 .segmented input:checked+span {
-  border-radius: 24px;
-  background: var(--md-sys-color-primary);
   color: var(--md-sys-color-on-primary);
+  border-radius: 24px;
 }
 
 .segmented input:focus-visible+span {
   outline: 3px solid color-mix(in srgb, var(--md-sys-color-primary) 70%, transparent);
   outline-offset: 2px;
+}
+
+.segmented label:hover span {
+  box-shadow: inset 0 0 0 100vmax color-mix(in srgb, currentColor 8%, transparent);
+}
+
+/* Press state on connected buttons: squares up and widens, neighbours compress */
+.segmented label:active span {
+  transform: scaleX(1.06) scaleY(0.96);
+  border-radius: 12px;
+}
+
+.segmented:has(input:checked:active)::before {
+  border-radius: 12px;
+  transform: scaleY(0.96);
+}
+
+.segmented label:has(+ label:active) span {
+  transform: scaleX(0.96);
+}
+
+.segmented label:active + label span {
+  transform: scaleX(0.96);
+}
+
+#format-hint {
+  min-height: 2.6em;
+  transition: opacity 0.2s var(--spring-effects);
 }
 
 /* bitrate quality slider */
@@ -1234,6 +1330,13 @@ body[data-stage="working"] .media {
   background: var(--md-sys-color-primary);
   pointer-events: none;
   transform: translateX(-50%);
+  transition: width 0.2s var(--spring-spatial), border-radius 0.2s var(--spring-spatial);
+}
+
+.slider:has(input:active) .slider__thumb,
+.slider input:active ~ .slider__thumb {
+  width: 8px;
+  border-radius: 4px;
 }
 
 .slider input:disabled {
@@ -2434,6 +2537,20 @@ html[data-dir="back"]::view-transition-new(stage) {
   ::view-transition-old(*),
   ::view-transition-new(*) {
     animation: none !important;
+  }
+
+  .segmented::before {
+    transition: none !important;
+  }
+
+  .btn,
+  .icon-btn,
+  .segmented span,
+  #fetch-btn .icon,
+  #download-btn .icon,
+  #back-btn .icon {
+    transform: none !important;
+    transition: none !important;
   }
   /* keep a visible, static "working" state instead of a frozen sweep */
   .wavy[data-indeterminate="true"] .wavy__fill {
