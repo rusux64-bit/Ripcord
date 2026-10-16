@@ -117,11 +117,89 @@ function safeName(text) {
     return String(text).replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '').replace(/\s+/g, ' ').trim();
 }
 
-// strip out bracketed words like official video from titles
-const JUNK = /\s*[([][^)\]]*\b(official|video|audio|lyrics?|remaster(ed)?|hd|4k|visuali[sz]er|explicit)\b[^)\]]*[)\]]/gi;
+// Multilingual title cleaner patterns.
+// Adding a language is a single one-line entry in LANG_PATTERNS with an array of junk phrases/tokens.
+// Matching lowers, NFKD-normalizes, strips combining marks, and folds ё->е for the test only.
+// Word-based languages use Unicode lookarounds (?<![\p{L}\p{N}]) ... (?![\p{L}\p{N}]), while CJK terms match anywhere.
+// Compiled once at startup with zero per-keystroke RegExp creation and no catastrophic backtracking.
+function normForTest(s) {
+    return s
+        .toLowerCase()
+        .normalize('NFKD')
+        .replace(/\p{M}/gu, '')
+        .replace(/ё/g, 'е')
+        .replace(/['’ʼ]/g, "'");
+}
+
+const LANG_PATTERNS = {
+    en: ['official music video', 'official video', 'music video', 'official audio', 'official visualizer', 'lyric video', 'lyrics video', 'lyrics', 'lyric', 'visualizer', 'audio', 'remastered', 'remaster', 'explicit', 'clean version', 'hq', 'hd', '4k', '1080p', '720p'],
+    ro: ['videoclip oficial', 'clip oficial', 'audio oficial', 'versuri oficiale', 'versuri', 'videoclip'],
+    fr: ['clip officiel', 'video officielle', 'audio officiel', 'paroles', 'clip video', 'version acoustique', 'clip', 'officiel', 'officielle'],
+    ru: ['официальное видео', 'официальный клип', 'официальное аудио', 'официальный звук', 'текст песни', 'слова песни', 'премьера клипа', 'премьера трека', 'премьера', 'клип', 'музыкальное видео'],
+    pl: ['oficjalny teledysk', 'oficjalne video', 'oficjalne audio', 'tekst piosenki', 'z tekstem', 'teledysk', 'tekst', 'oficjalny', 'oficjalne'],
+    de: ['offizielles musikvideo', 'offizielles video', 'offizielles audio', 'songtext', 'mit text', 'musikvideo', 'offiziell', 'offizielles'],
+    es: ['videoclip oficial', 'video oficial', 'audio oficial', 'video con letra', 'letra', 'videoclip', 'oficial'],
+    it: ['videoclip ufficiale', 'video ufficiale', 'audio ufficiale', 'testo', 'videoclip', 'ufficiale'],
+    pt: ['videoclipe oficial', 'video oficial', 'audio oficial', 'com letra', 'letra', 'videoclipe'],
+    nl: ['officiele video', 'officiele audio', 'songtekst', 'met tekst', 'videoclip', 'officieel', 'officiele'],
+    tr: ['resmi muzik video', 'resmi video', 'resmi ses', 'resmi klip', 'sarki sozleri', 'sozleri', 'sozler', 'klip', 'resmi'],
+    uk: ['офіційне відео', 'офіційний кліп', 'офіційне аудіо', 'текст пісні', "прем'єра кліпу", 'премьера клипу', 'кліп', 'офіційне', 'офіційний'],
+    cs: ['oficialni videoklip', 'oficialni video', 'oficialni audio', 'text pisne', 's textem', 'videoklip', 'oficialni'],
+    hu: ['hivatalos videoklip', 'hivatalos video', 'hivatalos audio', 'dalszoveg', 'szoveggel', 'hivatalos', 'klip'],
+    cjk: ['公式mv', '公式ビデオ', '公式', '歌詞付き', '歌詞', 'ミュージックビデオ', '공식 뮤직비디오', '공식 mv', '공식', '뮤직비디오', '가사', '官方mv', '官方音樂錄影帶', '官方音乐视频', '官方', '歌词', '动态歌词']
+};
+
+const rawPhrases = Object.values(LANG_PATTERNS).flat();
+const cjkPhrases = [];
+const nonCjkPhrases = [];
+const isCjk = str => /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f\uac00-\ud7af]/u.test(str);
+
+for (const phrase of rawPhrases) {
+    const norm = normForTest(phrase);
+    if (isCjk(norm)) cjkPhrases.push(norm);
+    else nonCjkPhrases.push(norm);
+}
+
+cjkPhrases.sort((a, b) => b.length - a.length);
+nonCjkPhrases.sort((a, b) => b.length - a.length);
+
+const escapeRegExp = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const cjkPattern = cjkPhrases.map(escapeRegExp).join('|');
+const nonCjkPattern = `(?<![\\p{L}\\p{N}])(?:${nonCjkPhrases.map(escapeRegExp).join('|')})(?![\\p{L}\\p{N}])`;
+
+const JUNK_TEST_REGEX = new RegExp(`${nonCjkPattern}|${cjkPattern}`, 'u');
+const JUNK_STRIP_REGEX = new RegExp(`${nonCjkPattern}|${cjkPattern}`, 'gu');
+const BRACKET_PAIR_REGEX = /\s*(\([^\)]*\)|\[[^\]]*\]|\{[^\}]*\}|【[^】]*】|（[^）]*）|［[^］]*］|｛[^｝]*｝|「[^」]*」|『[^』]*』|《[^》]*》|〈[^〉]*〉)/gu;
+const TRAILING_SEP_REGEX = /(?:[\s\-_—–−|｜/]+|\s*\/\/\s*)([^|｜/—–−-]+)$/u;
+
+function isJunkBracket(segment) {
+    const inner = segment.slice(1, -1).trim();
+    if (!inner) return false;
+    return JUNK_TEST_REGEX.test(normForTest(inner));
+}
+
+function stripTrailingJunk(str) {
+    let current = str;
+    for (let i = 0; i < 3; i++) {
+        const match = current.match(TRAILING_SEP_REGEX);
+        if (!match) break;
+        const tail = match[1].trim();
+        if (!tail) break;
+        const normTail = normForTest(tail);
+        if (!JUNK_TEST_REGEX.test(normTail)) break;
+        const stripped = normTail.replace(JUNK_STRIP_REGEX, '');
+        if (/\p{L}/u.test(stripped)) break;
+        current = current.slice(0, match.index).trim();
+    }
+    return current;
+}
 
 function tidyTitle(title) {
-    const cleaned = title.replace(JUNK, '').replace(/\s{2,}/g, ' ').trim();
+    if (!title || typeof title !== 'string') return title || '';
+    let current = title;
+    current = current.replace(BRACKET_PAIR_REGEX, match => (isJunkBracket(match) ? '' : match));
+    current = stripTrailingJunk(current);
+    const cleaned = current.replace(/\s{2,}/g, ' ').trim();
     return cleaned || title;
 }
 
