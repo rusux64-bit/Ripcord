@@ -8,6 +8,58 @@ const root = document.documentElement;
 const body = document.body;
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 
+// in-memory client diagnostics ring buffer (max 100 entries)
+const clientLogs = [];
+
+function sanitizeForLogs(val) {
+    if (typeof val === 'string') {
+        return val.replace(/https?:\/\/[^\s"'<>)\]]+/g, '[URL]');
+    }
+    if (val && typeof val === 'object') {
+        if (Array.isArray(val)) return val.map(sanitizeForLogs);
+        const out = {};
+        for (const [k, v] of Object.entries(val)) {
+            const kl = k.toLowerCase();
+            if (kl.includes('url') || kl.includes('auth') || kl.includes('token') || kl.includes('cookie') || kl.includes('secret')) {
+                out[k] = '[REDACTED]';
+            } else {
+                out[k] = sanitizeForLogs(v);
+            }
+        }
+        return out;
+    }
+    return val;
+}
+
+function logClientEvent(type, msg, detail = {}) {
+    const entry = {
+        ts: new Date().toISOString(),
+        type,
+        msg: sanitizeForLogs(msg)
+    };
+    const cleanDetail = sanitizeForLogs(detail);
+    if (cleanDetail && typeof cleanDetail === 'object' && Object.keys(cleanDetail).length > 0) {
+        entry.detail = cleanDetail;
+    }
+    clientLogs.push(entry);
+    if (clientLogs.length > 100) clientLogs.shift();
+}
+window.__ripcord_logs = clientLogs;
+
+window.addEventListener('error', (event) => {
+    logClientEvent('error', event.message || 'Window error', {
+        filename: event.filename ? event.filename.split('/').pop() : '',
+        lineno: event.lineno,
+        colno: event.colno
+    });
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+    logClientEvent('error', 'Unhandled promise rejection', {
+        reason: event.reason instanceof Error ? event.reason.message : String(event.reason)
+    });
+});
+
 const el = {
     url: $('#url'),
     search: $('#search'),
@@ -59,7 +111,28 @@ const el = {
     aboutBtn: $('#about-btn'),
     aboutClose: $('#about-close'),
     about: $('#about'),
-    greeting: $('#greeting')
+    greeting: $('#greeting'),
+    inputError: $('#input-error'),
+    inputErrorMsg: $('#input-error-msg'),
+    inputErrorActions: $('#input-error-actions'),
+    inputErrorDetails: $('#input-error-details'),
+    inputErrorCode: $('#input-error-code'),
+    inputErrorRefRow: $('#input-error-ref-row'),
+    inputErrorRef: $('#input-error-ref'),
+    inputErrorCopy: $('#input-error-copy'),
+    optionsError: $('#options-error'),
+    optionsErrorMsg: $('#options-error-msg'),
+    optionsErrorActions: $('#options-error-actions'),
+    optionsErrorDetails: $('#options-error-details'),
+    optionsErrorCode: $('#options-error-code'),
+    optionsErrorRefRow: $('#options-error-ref-row'),
+    optionsErrorRef: $('#options-error-ref'),
+    optionsErrorCopy: $('#options-error-copy'),
+    doneSkipped: $('#done-skipped'),
+    doneSkippedToggle: $('#done-skipped-toggle'),
+    doneSkippedToggleText: $('#done-skipped-toggle-text'),
+    doneSkippedPanel: $('#done-skipped-panel'),
+    doneSkippedList: $('#done-skipped-list')
 };
 
 const state = {
@@ -74,7 +147,10 @@ const state = {
     jobId: '',
     poll: 0,
     rows: [],
-    activeRow: -1
+    activeRow: -1,
+    lastJob: null,
+    countdownTimer: null,
+    currentError: null
 };
 
 const BITRATES = [128, 192, 320];
@@ -531,6 +607,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
 
 let toastTimer = 0;
 function toast(message, ms = 1000) {
+    logClientEvent('toast', message);
     el.snackbarText.textContent = message;
     el.snackbar.classList.add('show');
     clearTimeout(toastTimer);
@@ -538,10 +615,314 @@ function toast(message, ms = 1000) {
 }
 el.snackbarClose.addEventListener('click', () => el.snackbar.classList.remove('show'));
 
+// client error handling and diagnostics subsystem
+
+function legacyCopy(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+        document.execCommand('copy');
+    } catch { /* ignore */ }
+    document.body.removeChild(ta);
+}
+
+function copyDiagnostics(err) {
+    const diagnostics = {
+        code: err?.code || 'UNKNOWN',
+        requestId: err?.requestId || 'none',
+        timestamp: new Date().toISOString(),
+        appVersion: '1.0.0',
+        browser: navigator.userAgent || 'unknown',
+        logs: clientLogs.map(l => ({
+            ts: l.ts,
+            type: l.type,
+            msg: sanitizeForLogs(l.msg),
+            ...(l.detail ? { detail: sanitizeForLogs(l.detail) } : {})
+        }))
+    };
+    const jsonStr = JSON.stringify(diagnostics, null, 2);
+    const finalize = () => {
+        logClientEvent('action', 'Diagnostics copied to clipboard');
+        toast('Diagnostics copied to clipboard.', 2500);
+    };
+    if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(jsonStr).then(finalize).catch(() => {
+            legacyCopy(jsonStr);
+            finalize();
+        });
+    } else {
+        legacyCopy(jsonStr);
+        finalize();
+    }
+}
+
+const ERROR_MESSAGES = {
+    INVALID_URL: {
+        message: 'Please enter a valid Spotify or YouTube link.',
+        action: 'try_another'
+    },
+    UNSUPPORTED_URL: {
+        message: 'This link is not supported. Please use a Spotify or YouTube track or playlist.',
+        action: 'try_another'
+    },
+    UNSUPPORTED_FORMAT: {
+        message: 'The requested audio format or bitrate is not supported.',
+        action: 'try_another'
+    },
+    MIX_NOT_SUPPORTED: {
+        message: 'YouTube Mix/Radio playlists are dynamic and cannot be downloaded as collections.',
+        action: 'try_another'
+    },
+    QUEUE_FULL: {
+        message: 'The server queue is currently full. Please wait a moment and try again.',
+        action: 'retry',
+        defaultRetrySeconds: 5
+    },
+    RATE_LIMITED: {
+        message: 'Server is busy. Please wait before trying again.',
+        action: 'retry',
+        defaultRetrySeconds: 60
+    },
+    SERVER_SHUTTING_DOWN: {
+        message: 'The server is restarting. Please try again shortly.',
+        action: 'retry',
+        defaultRetrySeconds: 10
+    },
+    AGE_RESTRICTED: {
+        message: 'This video requires age confirmation.',
+        action: 'age_confirm'
+    },
+    LOGIN_REQUIRED: {
+        message: 'YouTube requires a login or bot verification to access this audio.',
+        action: 'try_another'
+    },
+    PRIVATE_OR_UNAVAILABLE: {
+        message: 'This track is private, deleted, or unavailable.',
+        action: 'try_another'
+    },
+    REGION_BLOCKED: {
+        message: 'This content is not available in the server’s region.',
+        action: 'try_another'
+    },
+    MEMBERS_ONLY: {
+        message: 'This video is restricted to channel members only.',
+        action: 'try_another'
+    },
+    LIVE_NOT_SUPPORTED: {
+        message: 'Live streams cannot be downloaded until they have concluded.',
+        action: 'try_another'
+    },
+    TOO_LARGE: {
+        message: 'The resulting audio file exceeds the server’s size limit.',
+        action: 'try_another'
+    },
+    TOO_LONG: {
+        message: 'This track exceeds the maximum allowed duration.',
+        action: 'try_another'
+    },
+    NETWORK_TIMEOUT: {
+        message: 'The connection to the upstream audio source timed out.',
+        action: 'retry',
+        defaultRetrySeconds: 5
+    },
+    NO_MATCH: {
+        message: 'Could not find a matching track for this Spotify song.',
+        action: 'try_another'
+    },
+    SPOTIFY_UNREADABLE: {
+        message: 'Track metadata is unavailable on Spotify.',
+        action: 'try_another'
+    },
+    ENCODE_FAILED: {
+        message: 'Audio encoding failed. Try a different format like MP3 or M4A.',
+        action: 'retry'
+    },
+    TIMEOUT: {
+        message: 'Audio processing timed out. Please try again.',
+        action: 'retry'
+    },
+    CANCELLED: {
+        message: 'The download was cancelled.',
+        action: null
+    },
+    INTERNAL: {
+        message: 'An internal server error occurred. Please try again.',
+        action: 'retry'
+    },
+    NETWORK_ERROR: {
+        message: 'Lost the network connection. Check your internet connection.',
+        action: 'retry'
+    }
+};
+
+function formatTrackFailure(code, error) {
+    switch (code) {
+        case 'AGE_RESTRICTED': return 'Age restricted';
+        case 'NO_MATCH': return 'No match found';
+        case 'RATE_LIMITED': return 'Rate limited';
+        case 'LOGIN_REQUIRED': return 'Bot check / login required';
+        case 'PRIVATE_OR_UNAVAILABLE': return 'Unavailable';
+        case 'REGION_BLOCKED': return 'Region blocked';
+        case 'MEMBERS_ONLY': return 'Members only';
+        case 'LIVE_NOT_SUPPORTED': return 'Live stream';
+        case 'TOO_LARGE': return 'Too large';
+        case 'TOO_LONG': return 'Too long';
+        case 'UNSUPPORTED_FORMAT': return 'Format error';
+        case 'ENCODE_FAILED': return 'Encode failed';
+        case 'NETWORK_TIMEOUT': return 'Network timeout';
+        case 'TIMEOUT': return 'Timed out';
+        default: return error || code || 'Skipped';
+    }
+}
+
+function normalizeError(data, httpStatus, requestId) {
+    const code = data?.code || (httpStatus === 429 ? 'RATE_LIMITED' : (httpStatus === 503 ? 'QUEUE_FULL' : (httpStatus >= 500 ? 'INTERNAL' : (httpStatus === 0 ? 'NETWORK_ERROR' : 'UNKNOWN'))));
+    const def = ERROR_MESSAGES[code] || {};
+    const message = def.message || data?.error || (httpStatus === 0 ? 'Lost connection. Check your internet.' : 'An error occurred.');
+    const action = data?.action || def.action || (def.defaultRetrySeconds ? 'retry' : 'try_another');
+    const retryAfterSeconds = data?.retryAfterSeconds || def.defaultRetrySeconds || null;
+
+    const err = new Error(message);
+    err.code = code;
+    err.httpStatus = httpStatus;
+    err.requestId = data?.requestId || requestId || null;
+    err.retryable = Boolean(data?.retryable || def.action === 'retry' || retryAfterSeconds);
+    err.action = action;
+    err.retryAfterSeconds = retryAfterSeconds;
+    return err;
+}
+
+function showErrorBanner(prefix, err, onRetry, onAgeConfirm) {
+    state.currentError = err;
+    clearInterval(state.countdownTimer);
+    state.countdownTimer = null;
+
+    const banner = el[`${prefix}Error`];
+    const msg = el[`${prefix}ErrorMsg`];
+    const actions = el[`${prefix}ErrorActions`];
+    const details = el[`${prefix}ErrorDetails`];
+    const code = el[`${prefix}ErrorCode`];
+    const refRow = el[`${prefix}ErrorRefRow`];
+    const ref = el[`${prefix}ErrorRef`];
+    const copy = el[`${prefix}ErrorCopy`];
+
+    if (!banner) return;
+
+    msg.textContent = err.message || 'An error occurred.';
+    code.textContent = err.code || 'UNKNOWN';
+    if (err.requestId) {
+        ref.textContent = err.requestId;
+        refRow.hidden = false;
+    } else {
+        refRow.hidden = true;
+    }
+    details.open = false;
+
+    copy.onclick = () => copyDiagnostics(err);
+
+    actions.replaceChildren();
+
+    if (err.action === 'retry') {
+        const retryBtn = document.createElement('button');
+        retryBtn.type = 'button';
+        retryBtn.className = 'btn btn--filled btn--sm';
+        let remaining = Number(err.retryAfterSeconds || 0);
+
+        if (remaining > 0) {
+            retryBtn.disabled = true;
+            retryBtn.textContent = `Retry (${remaining}s)`;
+            state.countdownTimer = setInterval(() => {
+                remaining -= 1;
+                if (remaining <= 0) {
+                    clearInterval(state.countdownTimer);
+                    state.countdownTimer = null;
+                    retryBtn.disabled = false;
+                    retryBtn.textContent = 'Retry';
+                } else {
+                    retryBtn.textContent = `Retry (${remaining}s)`;
+                }
+            }, 1000);
+        } else {
+            retryBtn.textContent = 'Retry';
+        }
+
+        retryBtn.addEventListener('click', () => {
+            clearInterval(state.countdownTimer);
+            state.countdownTimer = null;
+            clearErrorBanner(prefix);
+            onRetry?.();
+        });
+        actions.append(retryBtn);
+
+        const tryAnotherBtn = document.createElement('button');
+        tryAnotherBtn.type = 'button';
+        tryAnotherBtn.className = 'btn btn--tonal btn--sm';
+        tryAnotherBtn.textContent = 'Try another link';
+        tryAnotherBtn.addEventListener('click', resetToInput);
+        actions.append(tryAnotherBtn);
+
+    } else if (err.action === 'age_confirm') {
+        const ageBtn = document.createElement('button');
+        ageBtn.type = 'button';
+        ageBtn.className = 'btn btn--filled btn--sm';
+        ageBtn.textContent = "I'm 18 or older, continue";
+        ageBtn.addEventListener('click', () => {
+            clearErrorBanner(prefix);
+            onAgeConfirm?.();
+        });
+        actions.append(ageBtn);
+
+        const tryAnotherBtn = document.createElement('button');
+        tryAnotherBtn.type = 'button';
+        tryAnotherBtn.className = 'btn btn--tonal btn--sm';
+        tryAnotherBtn.textContent = 'Try another link';
+        tryAnotherBtn.addEventListener('click', resetToInput);
+        actions.append(tryAnotherBtn);
+
+    } else if (err.action === 'try_another') {
+        const tryAnotherBtn = document.createElement('button');
+        tryAnotherBtn.type = 'button';
+        tryAnotherBtn.className = 'btn btn--filled btn--sm';
+        tryAnotherBtn.textContent = 'Try another link';
+        tryAnotherBtn.addEventListener('click', resetToInput);
+        actions.append(tryAnotherBtn);
+    }
+
+    banner.hidden = false;
+}
+
+function clearErrorBanner(prefix) {
+    clearInterval(state.countdownTimer);
+    state.countdownTimer = null;
+    const banner = el[`${prefix}Error`];
+    if (banner) banner.hidden = true;
+}
+
+function resetToInput() {
+    clearErrorBanner('input');
+    clearErrorBanner('options');
+    el.url.value = '';
+    syncPasteButton();
+    setFieldError('');
+    go('input', 'back');
+    el.url.focus();
+}
+
 // open and close the about dialog
 
-el.aboutBtn.addEventListener('click', () => el.about.showModal());
-el.aboutClose.addEventListener('click', () => el.about.close());
+el.aboutBtn.addEventListener('click', () => {
+    logClientEvent('action', 'Opened about dialog');
+    el.about.showModal();
+});
+el.aboutClose.addEventListener('click', () => {
+    logClientEvent('action', 'Closed about dialog');
+    el.about.close();
+});
 el.about.addEventListener('click', event => {
     const rect = el.about.getBoundingClientRect();
     const isInDialog = (
@@ -579,6 +960,7 @@ const FOCUS_TARGET = {
 };
 
 function go(stage, dir = 'forward') {
+    logClientEvent('transition', `Transition to ${stage} (${dir})`);
     const apply = () => {
         state.stage = stage;
         body.dataset.stage = stage;
@@ -626,19 +1008,23 @@ function syncPasteButton() {
 el.url.addEventListener('input', () => {
     syncPasteButton();
     if (el.search.dataset.invalid === 'true') setFieldError('');
+    clearErrorBanner('input');
 });
 
 el.pasteBtn.addEventListener('click', async () => {
     if (el.url.value) {
+        logClientEvent('action', 'Cleared search input');
         el.url.value = '';
         syncPasteButton();
         setFieldError('');
+        clearErrorBanner('input');
         el.url.focus();
         return;
     }
     try {
         const text = await navigator.clipboard.readText();
         if (text) {
+            logClientEvent('action', 'Pasted link from clipboard');
             el.url.value = text.trim();
             syncPasteButton();
             submitUrl();
@@ -654,6 +1040,7 @@ document.addEventListener('paste', event => {
     if (state.stage !== 'input' || document.activeElement === el.url) return;
     const text = event.clipboardData?.getData('text');
     if (!text) return;
+    logClientEvent('action', 'Page paste detected');
     el.url.value = text.trim();
     syncPasteButton();
     submitUrl();
@@ -677,31 +1064,43 @@ function setFetching(on) {
 }
 
 let fetching = false;
-async function submitUrl() {
+async function submitUrl(ageConfirmed = false) {
     if (fetching) return;
     const url = normaliseUrl(el.url.value);
     if (!url) {
-        setFieldError(el.url.value.trim()
+        const msg = el.url.value.trim()
             ? 'That does not look like a Spotify or YouTube link.'
-            : 'Paste a link first.');
+            : 'Paste a link first.';
+        setFieldError(msg);
+        showErrorBanner('input', normalizeError({ code: 'INVALID_URL', error: msg }, 400), () => submitUrl(false), () => submitUrl(true));
         el.url.focus();
         return;
     }
     el.url.value = url;
     setFieldError('');
+    clearErrorBanner('input');
     fetching = true;
     setFetching(true);
+    logClientEvent('api', 'Fetching metadata', { ageConfirmed });
     try {
-        const res = await fetch(`/api/fetch-info?url=${encodeURIComponent(url)}`);
+        const params = new URLSearchParams({ url });
+        if (ageConfirmed) params.set('ageConfirmed', '1');
+        const res = await fetch(`/api/fetch-info?${params.toString()}`);
+        const requestId = res.headers.get('x-request-id') || '';
         const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || 'Something went wrong. Try again.');
+        if (!res.ok) throw normalizeError(data, res.status, requestId);
+        logClientEvent('api', 'Metadata fetched successfully', { type: data.type, trackCount: data.trackCount || 1, requestId });
         state.url = data.url || url;
         el.url.value = state.url;
         state.info = data;
         showOptions();
         remember(state.url, data);
     } catch (err) {
-        setFieldError(err.message);
+        logClientEvent('error', `Metadata fetch failed: [${err.code || 'UNKNOWN'}] ${err.message}`, {
+            code: err.code,
+            requestId: err.requestId
+        });
+        showErrorBanner('input', err, () => submitUrl(false), () => submitUrl(true));
     } finally {
         fetching = false;
         setFetching(false);
@@ -911,7 +1310,8 @@ el.backBtn.addEventListener('click', () => {
 
 // handle starting the download
 
-function startDownload() {
+function startDownload(ageConfirmed = false) {
+    clearErrorBanner('options');
     const info = state.info;
     const isCollection = info.type === 'collection';
     const fmt = currentFormat();
@@ -919,11 +1319,14 @@ function startDownload() {
     const name = safeName(el.filename.value) || suggestedName() || 'ripcord';
 
     const params = new URLSearchParams({ url: state.url, bitrate: String(bitrate), format: fmt, filename: name });
+    if (ageConfirmed) params.set('ageConfirmed', '1');
     if (!isCollection && nameTouched) {
         const customTitle = el.filename.value.trim().slice(0, 120);
         if (customTitle) params.set('title', customTitle);
     }
     const saveName = isCollection ? `${safeName(info.title) || 'ripcord'}.zip` : `${name}.${fmt}`;
+
+    logClientEvent('action', 'Initiated download', { format: fmt, bitrate, isCollection, ageConfirmed });
 
     el.workingTitle.textContent = isCollection ? 'Packing up your collection' : 'Pulling the sound out';
     el.metaLeft.textContent = 'Getting started';
@@ -968,18 +1371,24 @@ function startDownload() {
             setProgress(1);
             state.blob = xhr.response;
             state.blobName = saveName;
+            logClientEvent('api', 'Download completed successfully', { status: xhr.status, size: state.blob.size });
             saveBlob();
             finish(isCollection);
         } else {
-            let message = 'The download failed. Please try again.';
+            let data = {};
+            const requestId = xhr.getResponseHeader('X-Request-Id') || '';
             try {
-                const data = JSON.parse(await xhr.response.text());
-                if (data.error) message = data.error;
-            } catch { /* keep the generic message */ }
-            fail(message);
+                data = JSON.parse(await xhr.response.text());
+            } catch { /* keep generic */ }
+            const err = normalizeError(data, xhr.status, requestId);
+            fail(err);
         }
     };
-    xhr.onerror = () => { stopTimer(); fail('Lost the connection. Check your network and try again.'); };
+    xhr.onerror = () => {
+        stopTimer();
+        const err = normalizeError({ code: 'NETWORK_ERROR' }, 0);
+        fail(err);
+    };
     xhr.onabort = () => { stopTimer(); };
 
     xhr.send();
@@ -1092,15 +1501,19 @@ function updateTrackRow(row, track) {
     const info = TRACK_STATES[track.state] || TRACK_STATES.queued;
     const pct = Math.round((Number(track.progress) || 0) * 100);
     const determinate = track.state === 'downloading' && pct > 0;
-    const key = `${track.state}:${determinate ? pct : ''}:${track.error || ''}`;
+    const failureReason = track.state === 'failed' ? formatTrackFailure(track.code, track.error) : '';
+    const key = `${track.state}:${determinate ? pct : ''}:${failureReason}`;
     if (row.key === key) return;
     row.key = key;
     row.li.dataset.state = track.state in TRACK_STATES ? track.state : 'queued';
 
     const label = document.createElement('span');
-    label.textContent = track.state === 'failed' && track.error
-        ? track.error
-        : determinate ? `${info.label} ${pct}%` : info.label;
+    if (track.state === 'failed') {
+        label.textContent = `Skipped: ${failureReason}`;
+        row.li.title = track.error || failureReason;
+    } else {
+        label.textContent = determinate ? `${info.label} ${pct}%` : info.label;
+    }
 
     let indicator;
     if (info.spinner) {
@@ -1131,6 +1544,7 @@ function scrollRowIntoView(index) {
 }
 
 function applyJob(job) {
+    state.lastJob = job;
     const tracks = Array.isArray(job.tracks) ? job.tracks : [];
     if (!tracks.length) return;
     if (tracks.length !== state.rows.length) renderTrackList(tracks);
@@ -1144,7 +1558,7 @@ function applyJob(job) {
     const current = Math.min(total, processed + 1);
     const phase = processed >= total ? 'Zipping up' : `Downloading ${current} of ${total}`;
     const pct = setProgress(overall, phase);
-    el.metaLeft.textContent = `${phase} · ${pct}%${failed ? ` · ${failed} failed` : ''}`;
+    el.metaLeft.textContent = `${phase} · ${pct}%${failed ? ` · ${failed} skipped` : ''}`;
 
     const active = tracks.findIndex(t => t.state === 'matching' || t.state === 'downloading' || t.state === 'encoding');
     if (active !== -1 && active !== state.activeRow) {
@@ -1188,17 +1602,54 @@ function saveBlob() {
     setTimeout(() => URL.revokeObjectURL(href), 60000);
 }
 
-function fail(message) {
+function fail(err) {
     state.xhr = null;
-    toast(message, 6500);
+    logClientEvent('error', `Download failed: [${err.code || 'UNKNOWN'}] ${err.message}`, {
+        code: err.code,
+        requestId: err.requestId
+    });
     go('options', 'back');
+    showErrorBanner('options', err, () => startDownload(false), () => startDownload(true));
 }
 
 function finish(isCollection) {
     state.xhr = null;
-    el.doneSub.textContent = isCollection
-        ? 'Your ZIP should be in your downloads folder.'
-        : 'Your file should be in your downloads folder.';
+    if (isCollection && state.lastJob && Array.isArray(state.lastJob.tracks)) {
+        const tracks = state.lastJob.tracks;
+        const failedTracks = tracks.filter(t => t.state === 'failed');
+        const okCount = tracks.filter(t => t.state === 'done').length;
+
+        if (failedTracks.length > 0) {
+            el.doneTitle.textContent = `${okCount} of ${tracks.length} ready, ${failedTracks.length} skipped`;
+            el.doneSub.textContent = 'Your ZIP should be in your downloads folder.';
+            el.doneSkipped.hidden = false;
+            el.doneSkippedPanel.hidden = true;
+            el.doneSkippedToggle.setAttribute('aria-expanded', 'false');
+            el.doneSkippedToggleText.textContent = `${failedTracks.length} skipped (click to see why)`;
+            el.doneSkippedList.replaceChildren();
+
+            failedTracks.forEach(t => {
+                const li = document.createElement('li');
+                li.className = 'done-skipped__item';
+                const titleSpan = document.createElement('span');
+                titleSpan.className = 'done-skipped__title';
+                titleSpan.textContent = `${t.title || 'Track'}${t.artist ? ` - ${t.artist}` : ''}`;
+                const reasonSpan = document.createElement('span');
+                reasonSpan.className = 'done-skipped__reason';
+                reasonSpan.textContent = formatTrackFailure(t.code, t.error);
+                li.append(titleSpan, reasonSpan);
+                el.doneSkippedList.append(li);
+            });
+        } else {
+            el.doneTitle.textContent = 'All done. Enjoy!';
+            el.doneSub.textContent = 'Your ZIP should be in your downloads folder.';
+            el.doneSkipped.hidden = true;
+        }
+    } else {
+        el.doneTitle.textContent = 'All done. Enjoy!';
+        el.doneSub.textContent = 'Your file should be in your downloads folder.';
+        el.doneSkipped.hidden = true;
+    }
     go('done', 'forward');
     celebrate();
 }
@@ -1218,8 +1669,19 @@ function celebrate() {
     }
 }
 
-el.downloadBtn.addEventListener('click', startDownload);
+el.doneSkippedToggle.addEventListener('click', () => {
+    const isHidden = el.doneSkippedPanel.hidden;
+    el.doneSkippedPanel.hidden = !isHidden;
+    el.doneSkippedToggle.setAttribute('aria-expanded', String(isHidden));
+    logClientEvent('action', isHidden ? 'Expanded skipped tracks' : 'Collapsed skipped tracks');
+});
+
+el.downloadBtn.addEventListener('click', () => {
+    clearErrorBanner('options');
+    startDownload(false);
+});
 el.cancelBtn.addEventListener('click', () => {
+    logClientEvent('action', 'Cancelled download');
     state.jobId = '';
     stopPolling();
     if (state.xhr) state.xhr.abort();
@@ -1227,10 +1689,17 @@ el.cancelBtn.addEventListener('click', () => {
     toast('Cancelled.');
     go('options', 'back');
 });
-el.saveBtn.addEventListener('click', saveBlob);
+el.saveBtn.addEventListener('click', () => {
+    logClientEvent('action', 'Saved audio file again');
+    saveBlob();
+});
 el.againBtn.addEventListener('click', () => {
+    logClientEvent('action', 'Resetting to rip another track');
     state.blob = null;
     state.info = null;
+    state.lastJob = null;
+    clearErrorBanner('input');
+    clearErrorBanner('options');
     el.url.value = '';
     syncPasteButton();
     setFieldError('');
@@ -1250,3 +1719,4 @@ initColourEngine();
 setTimeout(() => {
     delete root.dataset.intro;
 }, 1350);
+

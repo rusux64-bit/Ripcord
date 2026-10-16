@@ -107,6 +107,26 @@
                             </button>
                         </div>
                         <p class="supporting" id="url-help">Spotify, YouTube or YouTube Music links work.</p>
+                        <div class="error-banner" id="input-error" hidden role="alert">
+                            <div class="error-banner__header">
+                                <span class="icon error-banner__icon" aria-hidden="true">error</span>
+                                <div class="error-banner__body">
+                                    <p class="error-banner__message" id="input-error-msg"></p>
+                                    <div class="error-banner__actions" id="input-error-actions"></div>
+                                </div>
+                            </div>
+                            <details class="error-banner__details" id="input-error-details">
+                                <summary>Details</summary>
+                                <div class="error-banner__meta">
+                                    <div class="error-banner__row"><span>Code:</span> <code id="input-error-code"></code></div>
+                                    <div class="error-banner__row" id="input-error-ref-row"><span>Ref:</span> <code id="input-error-ref"></code></div>
+                                    <button class="btn btn--tonal btn--sm error-banner__copy" id="input-error-copy" type="button">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 1H4C2.9 1 2 1.9 2 3v14h2V3h12V1zm3 4H8C6.9 5 6 5.9 6 7v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+                                        <span>Copy diagnostics</span>
+                                    </button>
+                                </div>
+                            </details>
+                        </div>
                         <div class="actions">
                             <button class="btn btn--filled btn--lg" id="fetch-btn" type="submit">
                                 <span class="icon" id="fetch-icon" aria-hidden="true">arrow_forward</span>
@@ -184,6 +204,27 @@
                                 right, but not always.</span>
                         </p>
 
+                        <div class="error-banner" id="options-error" hidden role="alert">
+                            <div class="error-banner__header">
+                                <span class="icon error-banner__icon" aria-hidden="true">error</span>
+                                <div class="error-banner__body">
+                                    <p class="error-banner__message" id="options-error-msg"></p>
+                                    <div class="error-banner__actions" id="options-error-actions"></div>
+                                </div>
+                            </div>
+                            <details class="error-banner__details" id="options-error-details">
+                                <summary>Details</summary>
+                                <div class="error-banner__meta">
+                                    <div class="error-banner__row"><span>Code:</span> <code id="options-error-code"></code></div>
+                                    <div class="error-banner__row" id="options-error-ref-row"><span>Ref:</span> <code id="options-error-ref"></code></div>
+                                    <button class="btn btn--tonal btn--sm error-banner__copy" id="options-error-copy" type="button">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 1H4C2.9 1 2 1.9 2 3v14h2V3h12V1zm3 4H8C6.9 5 6 5.9 6 7v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+                                        <span>Copy diagnostics</span>
+                                    </button>
+                                </div>
+                            </details>
+                        </div>
+
                         <div class="actions">
                             <button class="btn btn--tonal btn--lg" id="back-btn" type="button">
                                 <span class="icon" aria-hidden="true">arrow_back</span>Back
@@ -225,6 +266,15 @@
                     <span class="done__mark"><span class="icon fill" aria-hidden="true">check</span></span>
                     <h2 class="t-title" id="done-title" tabindex="-1">All done. Enjoy!</h2>
                     <p class="supporting" id="done-sub">Your file should be in your downloads.</p>
+                    <div class="done-skipped" id="done-skipped" hidden>
+                        <button class="btn btn--text btn--sm" id="done-skipped-toggle" type="button" aria-expanded="false">
+                            <span class="icon" aria-hidden="true">info</span>
+                            <span id="done-skipped-toggle-text">3 skipped (click to see why)</span>
+                        </button>
+                        <div class="done-skipped__panel" id="done-skipped-panel" hidden>
+                            <ul class="done-skipped__list" id="done-skipped-list"></ul>
+                        </div>
+                    </div>
                     <div class="actions">
                         <button class="btn btn--tonal btn--lg" id="again-btn" type="button">
                             <span class="icon" aria-hidden="true">refresh</span>Rip another
