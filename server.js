@@ -58,6 +58,292 @@ Logger.info('Ripcord audio engine initializing');
 Logger.info(`yt-dlp version: ${ytdlpVersion}`);
 Logger.info(`ffmpeg path: ${ffmpegPath}`);
 
+// Unified application error codes, safe user messages, and HTTP status mappings
+const ERROR_DEFINITIONS = {
+    INVALID_URL: {
+        httpStatus: 400,
+        userMessage: 'Please enter a valid Spotify or YouTube URL.',
+        retryable: false,
+        action: null
+    },
+    UNSUPPORTED_URL: {
+        httpStatus: 400,
+        userMessage: 'Unsupported URL. Please provide a Spotify or YouTube link.',
+        retryable: false,
+        action: null
+    },
+    UNSUPPORTED_FORMAT: {
+        httpStatus: 400,
+        userMessage: 'Unsupported audio format or bitrate.',
+        retryable: false,
+        action: null
+    },
+    MIX_NOT_SUPPORTED: {
+        httpStatus: 400,
+        userMessage: 'YouTube Mix/Radio playlists are dynamic and cannot be downloaded as collections. Please link a specific track or curated playlist.',
+        retryable: false,
+        action: null
+    },
+    QUEUE_FULL: {
+        httpStatus: 503,
+        userMessage: 'The queue is full. Please try again shortly.',
+        retryable: true,
+        action: 'retry',
+        retryAfterSeconds: 5
+    },
+    RATE_LIMITED: {
+        httpStatus: 429,
+        userMessage: 'Too many requests. Please wait before trying again.',
+        retryable: true,
+        action: 'retry',
+        retryAfterSeconds: 60
+    },
+    SERVER_SHUTTING_DOWN: {
+        httpStatus: 503,
+        userMessage: 'Server is shutting down.',
+        retryable: true,
+        action: 'retry',
+        retryAfterSeconds: 10
+    },
+    AGE_RESTRICTED: {
+        httpStatus: 403,
+        userMessage: 'This video is age-restricted and requires age confirmation.',
+        retryable: false,
+        action: 'age_confirm'
+    },
+    LOGIN_REQUIRED: {
+        httpStatus: 403,
+        userMessage: 'Sign in or bot verification is required for this content.',
+        retryable: false,
+        action: null
+    },
+    PRIVATE_OR_UNAVAILABLE: {
+        httpStatus: 404,
+        userMessage: 'This media is private, removed, or unavailable.',
+        retryable: false,
+        action: null
+    },
+    REGION_BLOCKED: {
+        httpStatus: 403,
+        userMessage: 'This video is not available in the server’s geographic region.',
+        retryable: false,
+        action: null
+    },
+    MEMBERS_ONLY: {
+        httpStatus: 403,
+        userMessage: 'This video is only available to channel members.',
+        retryable: false,
+        action: null
+    },
+    LIVE_NOT_SUPPORTED: {
+        httpStatus: 400,
+        userMessage: 'Live streams cannot be downloaded until the broadcast has ended.',
+        retryable: false,
+        action: null
+    },
+    TOO_LARGE: {
+        httpStatus: 413,
+        userMessage: 'The audio file exceeds the maximum allowed size limit.',
+        retryable: false,
+        action: null
+    },
+    TOO_LONG: {
+        httpStatus: 413,
+        userMessage: 'The media duration exceeds the maximum allowed limit.',
+        retryable: false,
+        action: null
+    },
+    NETWORK_TIMEOUT: {
+        httpStatus: 504,
+        userMessage: 'Network connection to upstream provider timed out.',
+        retryable: true,
+        action: 'retry'
+    },
+    NO_MATCH: {
+        httpStatus: 404,
+        userMessage: 'No matching audio track could be found.',
+        retryable: false,
+        action: null
+    },
+    SPOTIFY_UNREADABLE: {
+        httpStatus: 502,
+        userMessage: 'Unable to extract Spotify metadata. The track/playlist may be private or restricted.',
+        retryable: false,
+        action: null
+    },
+    ENCODE_FAILED: {
+        httpStatus: 500,
+        userMessage: 'Audio encoding failed.',
+        retryable: true,
+        action: 'retry'
+    },
+    TIMEOUT: {
+        httpStatus: 504,
+        userMessage: 'Processing timed out. Please try again.',
+        retryable: true,
+        action: 'retry'
+    },
+    CANCELLED: {
+        httpStatus: 499,
+        userMessage: 'The request was cancelled.',
+        retryable: false,
+        action: null
+    },
+    INTERNAL: {
+        httpStatus: 500,
+        userMessage: 'An internal server error occurred.',
+        retryable: true,
+        action: 'retry'
+    }
+};
+
+class AppError extends Error {
+    constructor(code, overrides = {}) {
+        const def = ERROR_DEFINITIONS[code] || ERROR_DEFINITIONS.INTERNAL;
+        const resolvedCode = (code in ERROR_DEFINITIONS) ? code : 'INTERNAL';
+        const userMsg = overrides.userMessage || def.userMessage;
+        super(userMsg);
+        this.name = 'AppError';
+        this.code = resolvedCode;
+        this.httpStatus = overrides.httpStatus || def.httpStatus;
+        this.userMessage = userMsg;
+        this.retryable = overrides.retryable !== undefined ? overrides.retryable : def.retryable;
+        this.action = overrides.action !== undefined ? overrides.action : (def.action || null);
+        this.internalDetail = overrides.internalDetail || null;
+        this.retryAfterSeconds = overrides.retryAfterSeconds !== undefined ? overrides.retryAfterSeconds : (def.retryAfterSeconds || null);
+    }
+}
+
+const CLASSIFIER_RULES = [
+    {
+        code: 'CANCELLED',
+        test: (combined, err) => err?.name === 'AbortError' || err?.code === 'ERR_CANCELED' || /request cancelled|request aborted|abort\(|aborted/i.test(combined)
+    },
+    {
+        code: 'RATE_LIMITED',
+        test: (combined, err) => err?.status === 429 || err?.response?.status === 429 || /http error 429|too many requests|rate limit/i.test(combined)
+    },
+    {
+        code: 'AGE_RESTRICTED',
+        test: (combined) => /sign in to confirm your age|confirm your age|age-restricted|inappropriate for some users|requires age confirmation/i.test(combined)
+    },
+    {
+        code: 'LOGIN_REQUIRED',
+        test: (combined) => /sign in to confirm you('?re| are) not a bot|confirm you('?re| are) not a bot|bot check|login required|solve the captcha|please sign in/i.test(combined)
+    },
+    {
+        code: 'REGION_BLOCKED',
+        test: (combined) => /not available in your country|blocked it in your country|geo-restricted|geographic region|geoblocked|uploader has not made this video available in your country/i.test(combined)
+    },
+    {
+        code: 'MEMBERS_ONLY',
+        test: (combined) => /join this channel to get access|members-only|members only/i.test(combined)
+    },
+    {
+        code: 'PRIVATE_OR_UNAVAILABLE',
+        test: (combined) => /private video|video is private|this video is private|video unavailable|video has been removed|this video is unavailable|deleted by the uploader|does not exist|media is not available/i.test(combined)
+    },
+    {
+        code: 'LIVE_NOT_SUPPORTED',
+        test: (combined) => /is a live stream|is currently live|live event will begin|premieres in|live stream recording is not available/i.test(combined)
+    },
+    {
+        code: 'TOO_LARGE',
+        test: (combined) => /file is larger than max-filesize|max-filesize|exceeds the allowed size|file size exceeds|audio output exceeds the allowed size|playlist track exceeds the allowed size|cover image exceeds size limit/i.test(combined)
+    },
+    {
+        code: 'TOO_LONG',
+        test: (combined) => /video is too long|duration exceeds|duration is longer than/i.test(combined)
+    },
+    {
+        code: 'NETWORK_TIMEOUT',
+        test: (combined, err) => ['ETIMEDOUT', 'ESOCKETTIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN'].includes(err?.code) ||
+            /connect timed out|read timed out|socket hang up|network is unreachable|econnreset|econnrefused|esockettimedout|etimedout/i.test(combined)
+    },
+    {
+        code: 'TIMEOUT',
+        test: (combined) => /timed out|timeout/i.test(combined)
+    },
+    {
+        code: 'NO_MATCH',
+        test: (combined) => /no search result|no match found|no candidates found|no tracks could be processed/i.test(combined)
+    },
+    {
+        code: 'SPOTIFY_UNREADABLE',
+        test: (combined) => /unable to extract spotify metadata|spotify metadata unreadable|invalid spotify link/i.test(combined)
+    },
+    {
+        code: 'ENCODE_FAILED',
+        test: (combined) => /ffmpeg encoding failed|conversion failed|invalid data found when processing input|error while opening encoder/i.test(combined)
+    },
+    {
+        code: 'QUEUE_FULL',
+        test: (combined) => /queue is full/i.test(combined)
+    },
+    {
+        code: 'MIX_NOT_SUPPORTED',
+        test: (combined) => /youtube mix\/radio playlists are dynamic/i.test(combined)
+    },
+    {
+        code: 'UNSUPPORTED_FORMAT',
+        test: (combined) => /unsupported audio format|unsupported audio bitrate/i.test(combined)
+    },
+    {
+        code: 'UNSUPPORTED_URL',
+        test: (combined) => /unsupported url/i.test(combined)
+    },
+    {
+        code: 'INVALID_URL',
+        test: (combined) => /invalid url|please enter a valid|filename is invalid|title is invalid|image host not allowed|not an image|cross-site requests are not allowed|unsupported or unreadable url format|api endpoint not found/i.test(combined)
+    },
+    {
+        code: 'SERVER_SHUTTING_DOWN',
+        test: (combined) => /server is shutting down/i.test(combined)
+    }
+];
+
+function classifyError(err, stderr = '') {
+    if (err instanceof AppError) return err;
+
+    const errMessage = err?.message || (typeof err === 'string' ? err : '');
+    const errStderr = err?.stderr || (typeof stderr === 'string' ? stderr : '');
+    const combined = `${errMessage}\n${errStderr}\n${stderr || ''}`;
+
+    for (const rule of CLASSIFIER_RULES) {
+        if (rule.test(combined, err)) {
+            return new AppError(rule.code, {
+                internalDetail: combined.trim().slice(-1000)
+            });
+        }
+    }
+
+    return new AppError('INTERNAL', {
+        internalDetail: combined.trim().slice(-1000)
+    });
+}
+
+function sendError(res, error, req = null) {
+    const appErr = error instanceof AppError ? error : classifyError(error, error?.stderr || '');
+    const requestId = req?.id || res.getHeader('X-Request-Id') || randomUUID();
+    res.setHeader('X-Request-Id', requestId);
+    if (res.headersSent) {
+        if (!res.destroyed) res.destroy();
+        return;
+    }
+    const responsePayload = {
+        error: appErr.userMessage,
+        code: appErr.code,
+        requestId,
+        retryable: appErr.retryable,
+        action: appErr.action || null,
+        retryAfterSeconds: appErr.retryAfterSeconds || null
+    };
+    if (appErr.retryAfterSeconds) {
+        res.setHeader('Retry-After', String(appErr.retryAfterSeconds));
+    }
+    return res.status(appErr.httpStatus).json(responsePayload);
+}
+
 function positiveIntegerEnv(name, fallback, max) {
     const raw = process.env[name];
     if (raw === undefined || raw === '') return fallback;
@@ -146,11 +432,11 @@ class DownloadQueue {
         this.shuttingDown = false;
     }
 
-    addTask(task, res) {
+    addTask(task, res, req = null) {
         if (this.shuttingDown) return false;
         if (this.running >= this.concurrency && this.queue.length >= this.maxQueued) return false;
 
-        const entry = { task, res, controller: new AbortController(), started: false };
+        const entry = { task, res, req, controller: new AbortController(), started: false };
         entry.onClose = () => {
             if (res.writableEnded) return;
             entry.controller.abort();
@@ -197,7 +483,7 @@ class DownloadQueue {
             entry.res.removeListener('close', entry.onClose);
             entry.controller.abort();
             if (!entry.res.headersSent) {
-                entry.res.status(503).json({ error: 'Server is shutting down.' });
+                sendError(entry.res, new AppError('SERVER_SHUTTING_DOWN'), entry.req);
             } else if (!entry.res.destroyed) {
                 entry.res.destroy();
             }
@@ -375,11 +661,20 @@ const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', TRUST_PROXY_HOPS);
 
+// Attach request ID and response header to every request early
+app.use((req, res, next) => {
+    const rawHeader = req.headers['x-request-id'];
+    const validHeader = typeof rawHeader === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(rawHeader);
+    req.id = validHeader ? rawHeader : randomUUID();
+    res.setHeader('X-Request-Id', req.id);
+    next();
+});
+
 let isShuttingDown = false;
 app.use((req, res, next) => {
     if (isShuttingDown) {
         res.setHeader('Connection', 'close');
-        return res.status(503).json({ error: 'Server is shutting down.' });
+        return sendError(res, new AppError('SERVER_SHUTTING_DOWN'), req);
     }
     next();
 });
@@ -407,7 +702,7 @@ function createRateLimiter(limit, message) {
         limit,
         standardHeaders: 'draft-8',
         legacyHeaders: false,
-        handler: (req, res) => res.status(429).json({ error: message })
+        handler: (req, res) => sendError(res, new AppError('RATE_LIMITED', { userMessage: message }), req)
     });
 }
 
@@ -425,21 +720,37 @@ function createJob(jobId, tracks) {
     if (downloadJobs.size >= MAX_TRACKED_JOBS) downloadJobs.delete(downloadJobs.keys().next().value);
     const job = {
         status: 'running',
+        error: null,
+        code: null,
         tracks: tracks.map(track => ({
             title: String(track.title || 'Unknown Track').slice(0, 200),
             artist: String(track.artist || '').slice(0, 200),
             state: 'queued',
-            progress: 0
+            progress: 0,
+            code: null,
+            error: null
         }))
     };
     downloadJobs.set(jobId, job);
     return job;
 }
 
-function endJob(jobId, status) {
+function endJob(jobId, status, errorInfo = null) {
     const job = jobId && downloadJobs.get(jobId);
     if (!job) return;
     job.status = status;
+    if (errorInfo) {
+        if (errorInfo instanceof AppError) {
+            job.error = errorInfo.userMessage;
+            job.code = errorInfo.code;
+        } else if (typeof errorInfo === 'string') {
+            job.error = errorInfo;
+            job.code = errorInfo === 'cancelled' ? 'CANCELLED' : 'INTERNAL';
+        } else if (errorInfo && typeof errorInfo === 'object') {
+            job.error = errorInfo.userMessage || errorInfo.error || errorInfo.message || null;
+            job.code = errorInfo.code || null;
+        }
+    }
     setTimeout(() => { if (downloadJobs.get(jobId) === job) downloadJobs.delete(jobId); }, 2 * 60 * 1000).unref();
 }
 
@@ -454,7 +765,7 @@ app.use('/api', createRateLimiter(API_RATE_LIMIT_MAX, 'Too many requests. Please
 
 function rejectCrossSiteRequests(req, res, next) {
     if (String(req.get('sec-fetch-site') || '').toLowerCase() === 'cross-site') {
-        return res.status(403).json({ error: 'Cross-site requests are not allowed.' });
+        return sendError(res, new AppError('INVALID_URL', { httpStatus: 403, userMessage: 'Cross-site requests are not allowed.' }), req);
     }
 
     const origin = req.get('origin');
@@ -464,7 +775,7 @@ function rejectCrossSiteRequests(req, res, next) {
             const originUrl = new URL(origin);
             const hostUrl = new URL(`http://${requestHost}`);
             if (originUrl.hostname.toLowerCase() !== hostUrl.hostname.toLowerCase()) {
-                return res.status(403).json({ error: 'Cross-site requests are not allowed.' });
+                return sendError(res, new AppError('INVALID_URL', { httpStatus: 403, userMessage: 'Cross-site requests are not allowed.' }), req);
             }
         } catch (e) {
             // Ignore malformed origin or host headers and preserve non-browser client compatibility.
@@ -1455,17 +1766,22 @@ async function getYoutubePlaylistData(url, signal) {
             }
             output += data.toString();
         });
-        ytdlp.stderr.on('data', (data) => Logger.warn(`yt-dlp playlist stderr: ${data.toString().trim()}`));
+        let stderr = '';
+        ytdlp.stderr.on('data', (data) => {
+            const text = data.toString();
+            stderr = (stderr + text).slice(-8000);
+            Logger.warn(`yt-dlp playlist stderr: ${text.trim()}`);
+        });
 
         ytdlp.on('close', (code) => {
             clearTimeout(timeout);
             signal?.removeEventListener('abort', onAbort);
             if (signal?.aborted) {
-                reject(new Error('Request cancelled.'));
+                reject(new AppError('CANCELLED'));
             } else if (timedOut) {
-                reject(new Error('Playlist metadata fetch timed out.'));
+                reject(new AppError('TIMEOUT', { userMessage: 'Playlist metadata fetch timed out.' }));
             } else if (outputBytes > MAX_PLAYLIST_OUTPUT_BYTES) {
-                reject(new Error('Playlist metadata exceeds the allowed size.'));
+                reject(new AppError('TOO_LARGE', { userMessage: 'Playlist metadata exceeds the allowed size.' }));
             } else if (code === 0 || output.length > 0) {
                 const lines = output.trim().split('\n').filter(Boolean);
                 let playlistName = 'YouTube Playlist';
@@ -1490,19 +1806,23 @@ async function getYoutubePlaylistData(url, signal) {
                 }).filter(Boolean);
 
                 if (tracks.length === 0) {
-                    reject(new Error('Playlist is empty or videos are unavailable/private.'));
+                    reject(classifyError(new Error('Playlist is empty or videos are unavailable/private.'), stderr));
                 } else {
                     resolve({ type: 'collection', name: playlistName, tracks });
                 }
             } else {
-                reject(new Error('Failed to fetch YouTube playlist tracks.'));
+                const err = new Error('Failed to fetch YouTube playlist tracks.');
+                err.stderr = stderr;
+                err.exitCode = code;
+                reject(classifyError(err, stderr));
             }
         });
 
         ytdlp.on('error', (err) => {
             clearTimeout(timeout);
             signal?.removeEventListener('abort', onAbort);
-            reject(err);
+            err.stderr = stderr;
+            reject(classifyError(err, stderr));
         });
     });
 }
@@ -1701,22 +2021,30 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal, targetForma
             if (signal?.aborted) onAbort();
             else signal?.addEventListener('abort', onAbort, { once: true });
 
-            ytdlp.stderr.on('data', (data) => Logger.warn(`yt-dlp: ${data.toString().trim()}`));
+            let stderr = '';
+            ytdlp.stderr.on('data', (data) => {
+                const text = data.toString();
+                stderr = (stderr + text).slice(-8000);
+                Logger.warn(`yt-dlp: ${text.trim()}`);
+            });
 
             ytdlp.on('close', (code) => {
                 clearTimeout(timeout);
                 signal?.removeEventListener('abort', onAbort);
                 if (signal?.aborted) {
                     cleanupFiles([tempPath]);
-                    reject(new Error('Request cancelled.'));
+                    reject(new AppError('CANCELLED'));
                 } else if (timedOut) {
                     cleanupFiles([tempPath]);
-                    reject(new Error('Audio download timed out.'));
+                    reject(new AppError('TIMEOUT', { userMessage: 'Audio download timed out.' }));
                 } else if (code === 0 && fs.existsSync(tempPath) && fs.statSync(tempPath).size <= MAX_DOWNLOAD_BYTES) {
                     resolve(tempPath);
                 } else {
                     cleanupFiles([tempPath]);
-                    reject(new Error('yt-dlp was unable to extract this audio source.'));
+                    const err = new Error('yt-dlp was unable to extract this audio source.');
+                    err.stderr = stderr;
+                    err.exitCode = code;
+                    reject(classifyError(err, stderr));
                 }
             });
 
@@ -1724,7 +2052,8 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal, targetForma
                 clearTimeout(timeout);
                 signal?.removeEventListener('abort', onAbort);
                 cleanupFiles([tempPath]);
-                reject(err);
+                err.stderr = stderr;
+                reject(classifyError(err, stderr));
             });
         });
     } finally {
@@ -1736,7 +2065,7 @@ async function runFfmpeg(args, timeoutMessage, signal) {
     await ffmpegSemaphore.acquire(signal);
     try {
         return await new Promise((resolve, reject) => {
-            if (signal?.aborted) return reject(new Error('Request cancelled.'));
+            if (signal?.aborted) return reject(new AppError('CANCELLED'));
 
             const ff = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
             let timedOut = false;
@@ -1747,18 +2076,24 @@ async function runFfmpeg(args, timeoutMessage, signal) {
             }, 60000);
             const onAbort = () => ff.kill('SIGKILL');
             signal?.addEventListener('abort', onAbort, { once: true });
-            ff.stderr.on('data', data => { stderr = (stderr + data.toString()).slice(-4000); });
+            ff.stderr.on('data', data => { stderr = (stderr + data.toString()).slice(-8000); });
             ff.on('error', error => {
                 clearTimeout(timeout);
                 signal?.removeEventListener('abort', onAbort);
-                reject(error);
+                error.stderr = stderr;
+                reject(classifyError(error, stderr));
             });
             ff.on('close', code => {
                 clearTimeout(timeout);
                 signal?.removeEventListener('abort', onAbort);
-                if (signal?.aborted) reject(new Error('Request cancelled.'));
-                else if (timedOut) reject(new Error(timeoutMessage));
-                else if (code !== 0) reject(new Error(stderr.trim().slice(-1000) || 'FFmpeg encoding failed.'));
+                if (signal?.aborted) reject(new AppError('CANCELLED'));
+                else if (timedOut) reject(new AppError('TIMEOUT', { userMessage: timeoutMessage }));
+                else if (code !== 0) {
+                    const err = new Error('FFmpeg encoding failed.');
+                    err.stderr = stderr;
+                    err.exitCode = code;
+                    reject(classifyError(err, stderr));
+                }
                 else resolve();
             });
         });
@@ -1947,12 +2282,14 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
         });
 
     } catch (error) {
-        Logger.error(`Audio processing error: ${error.message}`);
+        const appErr = classifyError(error, error?.stderr || '');
+        Logger.error(`Audio processing error: [${appErr.code}] ${appErr.message}`);
         res.removeListener('close', onDisconnect);
         cleanupFiles(tempFiles);
         if (!res.headersSent) {
-            res.status(502).json({ error: 'Unable to process this audio request.' });
-        } else res.destroy();
+            sendError(res, appErr, req);
+        } else if (!res.destroyed) res.destroy();
+        throw appErr;
     }
 }
 
@@ -2001,8 +2338,9 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal, report =
         tempFiles.push(tempAudioPath);
         return { track, index, title, artist, tempAudioPath, tempImgPath };
     } catch (err) {
-        Logger.error(`[Track ${index + 1}] FAILED: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - ${err.message}`);
-        report(index, { state: 'failed', progress: 1, error: /search result/i.test(err.message) ? 'No match found' : 'Download failed' });
+        const appErr = classifyError(err, err?.stderr || '');
+        Logger.error(`[Track ${index + 1}] FAILED: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - [${appErr.code}] ${appErr.message}`);
+        report(index, { state: 'failed', progress: 1, error: appErr.userMessage, code: appErr.code });
         cleanupFiles(tempFiles);
         return null;
     }
@@ -2026,14 +2364,14 @@ async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, r
             : `[Track ${index + 1}] Encoding audio to [${audioFormat.toUpperCase()}] at ${audioBitrate} kbps`);
         const args = ffmpegEncodeArgs(tempAudioPath, tempOutPath, audioFormat, audioBitrate, tempImgPath, title, artist, zipTrackLimit(audioFormat), copyAudio);
         await runFfmpeg(args, 'Track encoding timed out.', signal);
-        if (signal?.aborted) throw new Error('Request cancelled.');
-        if (fs.statSync(tempOutPath).size >= zipTrackLimit(audioFormat)) throw new Error('Playlist track exceeds the allowed size.');
+        if (signal?.aborted) throw new AppError('CANCELLED');
+        if (fs.statSync(tempOutPath).size >= zipTrackLimit(audioFormat)) throw new AppError('TOO_LARGE', { userMessage: 'Playlist track exceeds the allowed size.' });
 
         if (tempImgPath && fs.existsSync(tempOutPath) && audioFormat === 'ogg') {
             await injectVorbisCoverArt(tempOutPath, tempImgPath, audioFormat);
         }
 
-        if (fs.statSync(tempOutPath).size > zipTrackLimit(audioFormat)) throw new Error('Playlist track exceeds the allowed size.');
+        if (fs.statSync(tempOutPath).size > zipTrackLimit(audioFormat)) throw new AppError('TOO_LARGE', { userMessage: 'Playlist track exceeds the allowed size.' });
         const safeName = sanitizeFilename(`${String(index + 1).padStart(2, '0')} - ${title} - ${artist}.${audioFormat}`);
 
         cleanupFiles(tempFiles.filter(file => file !== tempOutPath));
@@ -2041,15 +2379,16 @@ async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, r
         return { name: safeName, filePath: tempOutPath };
 
     } catch (err) {
-        Logger.error(`[Track ${index + 1}] FAILED: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - ${err.message}`);
-        report(index, { state: 'failed', progress: 1, error: /size/i.test(err.message) ? 'Too large' : 'Encoding failed' });
+        const appErr = classifyError(err, err?.stderr || '');
+        Logger.error(`[Track ${index + 1}] FAILED: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - [${appErr.code}] ${appErr.message}`);
+        report(index, { state: 'failed', progress: 1, error: appErr.userMessage, code: appErr.code });
         cleanupFiles(tempFiles);
         return null;
     }
 }
 
 // worker function that processes the actual download request
-async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId = null, customTitle = '') {
+async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId = null, customTitle = '', req = null) {
     try {
         Logger.info(`Task started (${audioFormat.toUpperCase()})`);
         if (signal.aborted) return;
@@ -2072,7 +2411,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             res.setHeader('Content-Type', mimeType);
             const info = await getYoutubeInfo(url, signal);
             const trackTitle = customTitle || info.title;
-            await processAndStreamAudio(url, audioBitrate, audioFormat, info.thumbnail, res, trackTitle, info.author, signal);
+            await processAndStreamAudio(url, audioBitrate, audioFormat, info.thumbnail, res, trackTitle, info.author, signal, req);
             return;
         }
 
@@ -2084,7 +2423,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             const track = spotifyData.tracks[0];
             const matchUrl = await findSpotifyMatch(track, signal);
             const trackTitle = customTitle || track.title;
-            await processAndStreamAudio(matchUrl, audioBitrate, audioFormat, track.thumbnail, res, trackTitle, track.artist, signal);
+            await processAndStreamAudio(matchUrl, audioBitrate, audioFormat, track.thumbnail, res, trackTitle, track.artist, signal, req);
             return;
         }
 
@@ -2186,27 +2525,36 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                 handoffQueue.close();
                 await Promise.all(encodeWorkers);
 
-                if (signal.aborted) throw new Error('Request cancelled.');
-                if (addedTracks === 0) throw new Error('No tracks could be processed.');
+                if (signal.aborted) throw new AppError('CANCELLED');
+                if (addedTracks === 0) {
+                    const noMatchErr = new AppError('NO_MATCH', { userMessage: 'No tracks could be processed.' });
+                    endJob(jobId, 'failed', noMatchErr);
+                    throw noMatchErr;
+                }
                 await archive.finalize();
                 endJob(jobId, 'finished');
                 Logger.success(`Archive completed: ${zipName}`);
+            } catch (jobErr) {
+                const appErr = classifyError(jobErr, jobErr?.stderr || '');
+                if (job?.status === 'running') endJob(jobId, signal.aborted ? 'cancelled' : 'failed', appErr);
+                throw appErr;
             } finally {
                 signal.removeEventListener('abort', onAbort);
                 cleanupTrackFiles();
-                if (job?.status === 'running') endJob(jobId, signal.aborted ? 'cancelled' : 'failed');
+                if (job?.status === 'running') endJob(jobId, signal.aborted ? 'cancelled' : 'failed', new AppError(signal.aborted ? 'CANCELLED' : 'INTERNAL'));
             }
             return;
         }
 
         if (!res.headersSent) {
-            res.status(400).json({ error: 'Unsupported or unreadable URL format.' });
+            sendError(res, new AppError('UNSUPPORTED_URL', { userMessage: 'Unsupported or unreadable URL format.' }), req);
         }
 
     } catch (error) {
-        Logger.error(`Queue execution error: ${error.message}`);
+        const appErr = classifyError(error, error?.stderr || '');
+        Logger.error(`Queue execution error: [${appErr.code}] ${appErr.message}`);
         if (!res.headersSent) {
-            res.status(502).json({ error: 'Unable to complete this download request.' });
+            sendError(res, appErr, req);
         } else if (!res.destroyed) res.destroy();
     }
 }
@@ -2221,7 +2569,7 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
     try {
         const rawUrl = req.query.url;
         if (!isSafeUrl(rawUrl)) {
-            return res.status(400).json({ error: 'Please enter a valid Spotify or YouTube URL.' });
+            return sendError(res, new AppError('INVALID_URL', { userMessage: 'Please enter a valid Spotify or YouTube URL.' }), req);
         }
         const parsedUrl = new URL(rawUrl);
         parsedUrl.hash = '';
@@ -2238,13 +2586,13 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
         Logger.info(`Metadata requested from ${new URL(url).hostname}`);
 
         if (isYouTubeUrl(url) && !isYouTubePlaylist(url) && !getYouTubeVideoId(url)) {
-            return res.status(400).json({ error: 'YouTube Mix/Radio playlists are dynamic and cannot be downloaded as collections. Please link a specific track or curated playlist.' });
+            return sendError(res, new AppError('MIX_NOT_SUPPORTED'), req);
         }
 
         if (isYouTubePlaylist(url)) {
             metadataAcquisition = metadataSemaphore.tryAcquire();
             if (!metadataAcquisition) {
-                return res.status(503).json({ error: 'The metadata queue is full. Please try again shortly.' });
+                return sendError(res, new AppError('QUEUE_FULL', { userMessage: 'The metadata queue is full. Please try again shortly.' }), req);
             }
             let release;
             try {
@@ -2293,11 +2641,12 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
                 url
             });
         } else {
-            return res.status(400).json({ error: 'Unsupported URL. Please provide a Spotify or YouTube link.' });
+            return sendError(res, new AppError('UNSUPPORTED_URL', { userMessage: 'Unsupported URL. Please provide a Spotify or YouTube link.' }), req);
         }
     } catch (error) {
-        Logger.error(`Fetch info error: ${error.message}`);
-        if (!res.destroyed && !res.headersSent) res.status(502).json({ error: 'Unable to inspect this media link.' });
+        const appErr = classifyError(error, error?.stderr || '');
+        Logger.error(`Fetch info error: [${appErr.code}] ${appErr.message}`);
+        if (!res.destroyed && !res.headersSent) sendError(res, appErr, req);
     }
 });
 
@@ -2308,25 +2657,25 @@ app.get('/api/download', rejectCrossSiteRequests, (req, res) => {
     const filename = req.query.filename;
     const format = req.query.format;
     const title = req.query.title;
-        const audioBitrate = bitrate === undefined
-            ? 128
-            : typeof bitrate === 'string' && /^\d{2,3}$/.test(bitrate) ? Number(bitrate) : NaN;
+    const audioBitrate = bitrate === undefined
+        ? 128
+        : typeof bitrate === 'string' && /^\d{2,3}$/.test(bitrate) ? Number(bitrate) : NaN;
     const audioFormat = format === undefined ? 'mp3' : format;
 
     if (!isSafeUrl(rawUrl)) {
-        return res.status(400).json({ error: 'Invalid URL provided.' });
+        return sendError(res, new AppError('INVALID_URL', { userMessage: 'Invalid URL provided.' }), req);
     }
     if (typeof audioFormat !== 'string' || !['mp3', 'm4a', 'flac', 'wav', 'ogg'].includes(audioFormat)) {
-        return res.status(400).json({ error: 'Unsupported audio format.' });
+        return sendError(res, new AppError('UNSUPPORTED_FORMAT', { userMessage: 'Unsupported audio format.' }), req);
     }
     if (typeof audioBitrate !== 'number' || ![128, 192, 320].includes(audioBitrate)) {
-        return res.status(400).json({ error: 'Unsupported audio bitrate.' });
+        return sendError(res, new AppError('UNSUPPORTED_FORMAT', { userMessage: 'Unsupported audio bitrate.' }), req);
     }
     if (filename !== undefined && (typeof filename !== 'string' || filename.length > 120)) {
-        return res.status(400).json({ error: 'Filename is invalid or too long.' });
+        return sendError(res, new AppError('INVALID_URL', { userMessage: 'Filename is invalid or too long.' }), req);
     }
     if (title !== undefined && (typeof title !== 'string' || title.length > 120)) {
-        return res.status(400).json({ error: 'Title is invalid or too long.' });
+        return sendError(res, new AppError('INVALID_URL', { userMessage: 'Title is invalid or too long.' }), req);
     }
 
     const parsedUrl = new URL(rawUrl);
@@ -2338,11 +2687,12 @@ app.get('/api/download', rejectCrossSiteRequests, (req, res) => {
     const jobId = typeof req.query.job === 'string' && JOB_ID_PATTERN.test(req.query.job) ? req.query.job : null;
 
     const accepted = downloadQueue.addTask(
-        signal => executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId, customTitle),
-        res
+        signal => executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId, customTitle, req),
+        res,
+        req
     );
     if (!accepted) {
-        return res.status(503).json({ error: 'The download queue is full. Please try again shortly.' });
+        return sendError(res, new AppError('QUEUE_FULL', { userMessage: 'The download queue is full. Please try again shortly.' }), req);
     }
 });
 
@@ -2350,7 +2700,7 @@ app.get('/api/download', rejectCrossSiteRequests, (req, res) => {
 app.get('/api/cover', rejectCrossSiteRequests, async (req, res) => {
     const target = parseCoverUrl(req.query.url);
     if (!target) {
-        return res.status(400).json({ error: 'Image host not allowed.' });
+        return sendError(res, new AppError('INVALID_URL', { userMessage: 'Image host not allowed.' }), req);
     }
 
     const controller = new AbortController();
@@ -2371,7 +2721,7 @@ app.get('/api/cover', rejectCrossSiteRequests, async (req, res) => {
         if (!['image/jpeg', 'image/png', 'image/webp'].includes(contentType)
             || (Number.isFinite(contentLength) && contentLength > MAX_COVER_BYTES)) {
             upstream.data.destroy();
-            return res.status(502).json({ error: 'Not an image.' });
+            return sendError(res, new AppError('INVALID_URL', { httpStatus: 502, userMessage: 'Not an image.' }), req);
         }
         let receivedBytes = 0;
         const sizeLimit = new Transform({
@@ -2385,7 +2735,7 @@ app.get('/api/cover', rejectCrossSiteRequests, async (req, res) => {
             upstream.data.destroy();
             if (res.destroyed) return;
             if (res.headersSent) res.destroy();
-            else res.status(502).json({ error: 'Could not load image.' });
+            else sendError(res, new AppError('INTERNAL', { httpStatus: 502, userMessage: 'Could not load image.' }), req);
         };
         upstream.data.on('error', streamError);
         sizeLimit.on('error', streamError);
@@ -2393,11 +2743,11 @@ app.get('/api/cover', rejectCrossSiteRequests, async (req, res) => {
         res.set('Cache-Control', 'public, max-age=86400');
         upstream.data.pipe(sizeLimit).pipe(res);
     } catch {
-        if (!res.destroyed && !res.headersSent) res.status(502).json({ error: 'Could not load image.' });
+        if (!res.destroyed && !res.headersSent) sendError(res, new AppError('INTERNAL', { httpStatus: 502, userMessage: 'Could not load image.' }), req);
     }
 });
 
-app.use('/api', (req, res) => res.status(404).json({ error: 'API endpoint not found.' }));
+app.use('/api', (req, res) => sendError(res, new AppError('INVALID_URL', { httpStatus: 404, userMessage: 'API endpoint not found.' }), req));
 
 // send index.html for any other GET route
 app.get('/{*splat}', (req, res) => {
@@ -2407,7 +2757,7 @@ app.get('/{*splat}', (req, res) => {
 app.use((err, req, res, next) => {
     Logger.error(`Unhandled request error: ${err.message}`);
     if (res.headersSent) return res.destroy();
-    res.status(500).json({ error: 'Internal server error.' });
+    sendError(res, classifyError(err), req);
 });
 
 process.on('unhandledRejection', (reason) => {
@@ -2489,5 +2839,9 @@ module.exports = {
     DownloadQueue,
     sweepWorkDir,
     cleanupStaleWorkFiles,
-    gracefulShutdown
+    gracefulShutdown,
+    AppError,
+    ERROR_DEFINITIONS,
+    classifyError,
+    sendError
 };
