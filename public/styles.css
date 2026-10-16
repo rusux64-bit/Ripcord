@@ -893,10 +893,41 @@ body[data-stage="done"] #screen-done {
   margin-bottom: 10px;
 }
 
-.group[data-disabled="true"] {
-  opacity: 0.45;
-  pointer-events: none;
-  transition: opacity 0.3s;
+#quality-group {
+  display: grid;
+  grid-template-rows: 1fr;
+  align-self: start;
+  gap: 0;
+  margin-bottom: 0;
+  visibility: visible;
+  transition: grid-template-rows 0.35s var(--spring-spatial),
+              margin-bottom 0.35s var(--spring-spatial),
+              visibility 0s 0s;
+}
+
+#quality-group[data-collapsed="true"] {
+  grid-template-rows: 0fr;
+  margin-bottom: -16px;
+  visibility: hidden;
+  transition: grid-template-rows 0.35s var(--spring-spatial),
+              margin-bottom 0.35s var(--spring-spatial),
+              visibility 0s 0.35s;
+}
+
+#quality-group .group__inner {
+  display: grid;
+  gap: 10px;
+  min-height: 0;
+  overflow: hidden;
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 0.25s var(--spring-effects),
+              transform 0.35s var(--spring-spatial);
+}
+
+#quality-group[data-collapsed="true"] .group__inner {
+  opacity: 0;
+  transform: translateY(-8px);
 }
 
 .label-row {

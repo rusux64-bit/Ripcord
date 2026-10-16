@@ -717,7 +717,9 @@ function refreshFormat() {
     const lossless = LOSSLESS.has(fmt);
     el.ext.textContent = `.${fmt}`;
     el.formatHint.textContent = FORMAT_HINTS[fmt];
-    el.qualityGroup.dataset.disabled = String(lossless);
+    el.qualityGroup.dataset.collapsed = String(lossless);
+    el.qualityGroup.inert = lossless;
+    el.qualityGroup.setAttribute('aria-hidden', String(lossless));
     el.bitrate.disabled = lossless;
     el.bitrateOut.textContent = lossless ? 'Lossless' : `${BITRATES[el.bitrate.value]} kbps`;
 }
@@ -728,7 +730,10 @@ function refreshSlider() {
     el.bitrateOut.textContent = LOSSLESS.has(currentFormat()) ? 'Lossless' : `${BITRATES[el.bitrate.value]} kbps`;
 }
 
-$$('input[name="format"]').forEach(i => i.addEventListener('change', refreshFormat));
+$$('input[name="format"]').forEach(i => {
+    i.addEventListener('change', refreshFormat);
+    i.addEventListener('input', refreshFormat);
+});
 $$('input[name="namestyle"]').forEach(i => i.addEventListener('change', () => { nameTouched = false; refreshName(); }));
 el.clean.addEventListener('change', () => { nameTouched = false; refreshName(); });
 el.bitrate.addEventListener('input', refreshSlider);
