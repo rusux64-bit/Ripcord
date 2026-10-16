@@ -6,6 +6,10 @@ node_modules/
 .env.local
 .env.*.local
 cookies.txt
+cookies/
+age_cookies/
+*.cookies
+ripcord_cookie_*.tmp
 
 # Logs
 logs/

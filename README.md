@@ -60,6 +60,25 @@ Open `http://localhost:5224`.
 docker compose up -d
 ```
 
+### Age-Gate Cookie Pool (Optional)
+
+YouTube restricts certain videos behind age verification. Ripcord provides an opt-in, secure multi-account cookie pool:
+
+1. Enable the pool in `.env`:
+   ```bash
+   AGE_GATE_COOKIES=on
+   YTDLP_AGE_COOKIES_DIR=/path/to/age_cookies
+   ```
+2. Create dedicated throwaway Google/YouTube accounts (never use your personal accounts).
+3. In a fresh private/incognito window, log in and export the cookies in Netscape format.
+4. **Never reuse the browser session** after exporting to avoid triggering bot challenges or session termination.
+5. Save the exported cookie file into `YTDLP_AGE_COOKIES_DIR` with strict permissions:
+   ```bash
+   chmod 700 /path/to/age_cookies
+   chmod 600 /path/to/age_cookies/*.txt
+   ```
+6. The server automatically validates Netscape headers, enforces a domain whitelist (`.youtube.com`, `.google.com`), isolates execution to private `0600` copies in `WORK_DIR`, bounds concurrency to 1 per account, and applies backoff cooldowns on bot or login checks.
+
 ---
 
 ## Notes & Limitations
