@@ -38,21 +38,168 @@ const checkYtdlp = spawnSync('yt-dlp', ['--version']);
 const ytdlpAvailable = checkYtdlp.status === 0;
 const ytdlpVersion = ytdlpAvailable ? checkYtdlp.stdout.toString().trim() : 'NOT INSTALLED';
 
-// simple logger with timestamps and colors
-const Logger = {
-    _format: (level, msg) => {
-        const time = new Date().toISOString().replace('T', ' ').substring(0, 19);
-        const safeMessage = String(msg).replace(/[\x00-\x1F\x7F]/g, ' ').slice(0, 2000);
-        const colors = {
-            INFO: '\x1b[36m', SUCCESS: '\x1b[32m', WARN: '\x1b[33m', ERROR: '\x1b[31m', RESET: '\x1b[0m'
-        };
-        return `${colors[level] || ''}[${time}] [${level}]${colors.RESET} ${safeMessage}`;
-    },
-    info: (msg) => console.log(Logger._format('INFO', msg)),
-    success: (msg) => console.log(Logger._format('SUCCESS', msg)),
-    warn: (msg) => console.log(Logger._format('WARN', msg)),
-    error: (msg) => console.error(Logger._format('ERROR', msg))
-};
+// optional cookies file if youtube starts blocking downloads
+const COOKIES_PATH = process.env.YTDLP_COOKIES_PATH || (fs.existsSync(path.join(__dirname, 'cookies.txt')) ? path.join(__dirname, 'cookies.txt') : null);
+
+function redactLog(str) {
+    if (typeof str !== 'string') {
+        if (str === null || str === undefined) return '';
+        if (str instanceof Error) str = str.stack || str.message;
+        else str = String(str);
+    }
+
+    let out = str;
+
+    // 1. Redact known cookies paths
+    if (typeof COOKIES_PATH === 'string' && COOKIES_PATH) {
+        out = out.split(COOKIES_PATH).join('[cookies.txt]');
+    }
+    if (process.env.YTDLP_COOKIES_PATH) {
+        out = out.split(process.env.YTDLP_COOKIES_PATH).join('[cookies.txt]');
+    }
+    if (process.env.YTDLP_AGE_COOKIES_DIR) {
+        out = out.split(process.env.YTDLP_AGE_COOKIES_DIR).join('[cookies_dir]');
+    }
+
+    // 2. Redact sensitive key=value patterns (tokens, auth, sid, cookies, secret, canary)
+    out = out.replace(/(?:cookie|token|auth|sid|secret|password|canary|access_token|refresh_token)\s*[:=]\s*([^\s,;&"']+)/gi, (match) => {
+        const prefix = match.split(/[:=]/)[0];
+        return `${prefix}=[REDACTED]`;
+    });
+
+    // Bare canary tokens (e.g. COOKIE_CANARY_12345)
+    out = out.replace(/COOKIE_CANARY_\w+/gi, '[CANARY_REDACTED]');
+
+    // 3. URLs: strip query parameters except keep video ID for YouTube
+    out = out.replace(/https?:\/\/[^\s"'<>)\]]+/g, (urlStr) => {
+        try {
+            const u = new URL(urlStr);
+            if (['youtube.com', 'www.youtube.com', 'm.youtube.com', 'music.youtube.com'].includes(u.hostname.toLowerCase())) {
+                const v = u.searchParams.get('v');
+                return `${u.protocol}//${u.hostname}${u.pathname}${v ? `?v=${v}` : ''}`;
+            }
+            if (u.hostname.toLowerCase() === 'youtu.be') {
+                return `${u.protocol}//${u.hostname}${u.pathname}`;
+            }
+            u.search = '';
+            u.hash = '';
+            return u.toString();
+        } catch {
+            return urlStr;
+        }
+    });
+
+    // 4. IP addresses: truncate IPv4
+    out = out.replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, (ip) => {
+        const parts = ip.split('.');
+        if (parts.length === 4 && parts.every(p => Number(p) >= 0 && Number(p) <= 255)) {
+            return `${parts[0]}.${parts[1]}.${parts[2]}.0`;
+        }
+        return ip;
+    });
+
+    // 5. Filesystem absolute paths to basenames (skipping URLs)
+    out = out.replace(/(?:^|[\s"'`([])(?:[a-zA-Z]:\\|\/)(?:[a-zA-Z0-9_.-]+[\\\/])+[a-zA-Z0-9_.-]+/g, (fullMatch) => {
+        const lead = fullMatch.match(/^[\s"'`(\[]/) ? fullMatch[0] : '';
+        const rawPath = fullMatch.slice(lead.length);
+        if (rawPath.startsWith('//') || rawPath.includes('://')) return fullMatch;
+        return lead + path.basename(rawPath);
+    });
+
+    // 6. Cap line length
+    if (out.length > 2000) {
+        out = out.slice(0, 2000) + '...[truncated]';
+    }
+
+    return out;
+}
+
+const LOG_LEVELS = { debug: 10, info: 20, success: 20, warn: 30, error: 40 };
+const CURRENT_LOG_LEVEL = LOG_LEVELS[String(process.env.LOG_LEVEL || 'info').toLowerCase()] || 20;
+const LOG_FORMAT = String(process.env.LOG_FORMAT || 'pretty').toLowerCase() === 'json' ? 'json' : 'pretty';
+
+class StructuredLogger {
+    constructor(context = {}) {
+        this.context = context;
+    }
+
+    child(extra = {}) {
+        return new StructuredLogger({ ...this.context, ...extra });
+    }
+
+    _log(levelStr, msg, meta = {}) {
+        const numericLevel = LOG_LEVELS[levelStr.toLowerCase()] || 20;
+        if (numericLevel < CURRENT_LOG_LEVEL) return;
+
+        const ts = new Date().toISOString();
+        const mergedMeta = { ...this.context, ...meta };
+        const cleanMsg = redactLog(msg);
+
+        if (LOG_FORMAT === 'json') {
+            const entry = {
+                ts,
+                level: levelStr,
+                msg: cleanMsg
+            };
+            for (const key of ['requestId', 'jobId', 'stage', 'trackIndex', 'durationMs', 'code', 'okCount', 'failedCount', 'failures']) {
+                if (mergedMeta[key] !== undefined) entry[key] = mergedMeta[key];
+            }
+            const serialized = JSON.stringify(entry);
+            if (levelStr === 'ERROR') console.error(serialized);
+            else if (levelStr === 'WARN') console.warn(serialized);
+            else console.log(serialized);
+        } else {
+            const colors = {
+                DEBUG: '\x1b[90m',
+                INFO: '\x1b[36m',
+                SUCCESS: '\x1b[32m',
+                WARN: '\x1b[33m',
+                ERROR: '\x1b[31m',
+                RESET: '\x1b[0m'
+            };
+            const time = ts.replace('T', ' ').substring(0, 19);
+            const reqPart = mergedMeta.requestId ? ` [${mergedMeta.requestId.slice(0, 8)}]` : '';
+            const jobPart = mergedMeta.jobId ? ` [job:${mergedMeta.jobId.slice(0, 8)}]` : '';
+            const stagePart = mergedMeta.stage ? ` [${mergedMeta.stage}]` : '';
+            const trackPart = mergedMeta.trackIndex !== undefined ? ` [track:${mergedMeta.trackIndex + 1}]` : '';
+            const durationPart = mergedMeta.durationMs !== undefined ? ` (${mergedMeta.durationMs}ms)` : '';
+            const codePart = mergedMeta.code ? ` [code:${mergedMeta.code}]` : '';
+
+            const prefix = `${colors[levelStr] || ''}[${time}] [${levelStr}]${colors.RESET}${reqPart}${jobPart}${stagePart}${trackPart}${codePart}`;
+            const line = `${prefix} ${cleanMsg}${durationPart}`;
+            if (levelStr === 'ERROR') console.error(line);
+            else if (levelStr === 'WARN') console.warn(line);
+            else console.log(line);
+        }
+    }
+
+    debug(msg, meta) { this._log('DEBUG', msg, meta); }
+    info(msg, meta) { this._log('INFO', msg, meta); }
+    success(msg, meta) { this._log('SUCCESS', msg, meta); }
+    warn(msg, meta) { this._log('WARN', msg, meta); }
+    error(msg, meta) { this._log('ERROR', msg, meta); }
+}
+
+const Logger = new StructuredLogger();
+
+function startStage(logger, stage, meta = {}) {
+    const activeLogger = logger || Logger;
+    const start = Date.now();
+    const stageLogger = activeLogger.child({ stage, ...meta });
+    stageLogger.debug(`Stage started: ${stage}`);
+    return {
+        logger: stageLogger,
+        end(status = 'ok', extra = {}) {
+            const durationMs = Date.now() - start;
+            if (status === 'ok') {
+                stageLogger.info(`Stage completed: ${stage}`, { durationMs, ...extra });
+            } else {
+                stageLogger.warn(`Stage failed: ${stage}`, { durationMs, ...extra });
+            }
+            return durationMs;
+        }
+    };
+}
 
 Logger.info('Ripcord audio engine initializing');
 Logger.info(`yt-dlp version: ${ytdlpVersion}`);
@@ -415,8 +562,6 @@ function sweepWorkDir(staleOnly = true) {
 const cleanupStaleWorkFiles = () => sweepWorkDir(true);
 cleanupStaleWorkFiles();
 
-// optional cookies file if youtube starts blocking downloads
-const COOKIES_PATH = process.env.YTDLP_COOKIES_PATH || (fs.existsSync(path.join(__dirname, 'cookies.txt')) ? path.join(__dirname, 'cookies.txt') : null);
 if (COOKIES_PATH) {
     Logger.info(`Using yt-dlp cookies from: ${COOKIES_PATH}`);
 }
@@ -661,12 +806,13 @@ const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', TRUST_PROXY_HOPS);
 
-// Attach request ID and response header to every request early
+// Attach request ID, logger, and response header to every request early
 app.use((req, res, next) => {
     const rawHeader = req.headers['x-request-id'];
     const validHeader = typeof rawHeader === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(rawHeader);
     req.id = validHeader ? rawHeader : randomUUID();
     res.setHeader('X-Request-Id', req.id);
+    req.logger = Logger.child({ requestId: req.id });
     next();
 });
 
@@ -1486,7 +1632,8 @@ function rankCandidates(track, candidates, options = {}) {
     return evaluated;
 }
 
-async function searchYouTubeCandidates(query, maxCandidates, signal) {
+async function searchYouTubeCandidates(query, maxCandidates, signal, logger = Logger) {
+    const stageTimer = startStage(logger, 'search');
     const searchTarget = `ytsearch${maxCandidates}:${query}`;
     const args = [
         '--dump-single-json', '--flat-playlist', '--skip-download', '--no-warnings',
@@ -1496,7 +1643,10 @@ async function searchYouTubeCandidates(query, maxCandidates, signal) {
     args.push('--', searchTarget);
 
     return new Promise((resolve, reject) => {
-        if (signal?.aborted) return reject(new Error('Request cancelled.'));
+        if (signal?.aborted) {
+            stageTimer.end('failed', { code: 'CANCELLED' });
+            return reject(new AppError('CANCELLED'));
+        }
         const ytdlp = spawn('yt-dlp', args);
         let output = '';
         let outputBytes = 0;
@@ -1512,30 +1662,50 @@ async function searchYouTubeCandidates(query, maxCandidates, signal) {
             if (outputBytes > 2 * 1024 * 1024) ytdlp.kill('SIGKILL');
             else output += chunk.toString();
         });
-        ytdlp.stderr.on('data', data => Logger.warn(`Spotify match search: ${data.toString().trim()}`));
+        let stderr = '';
+        ytdlp.stderr.on('data', data => {
+            const text = data.toString();
+            stderr = (stderr + text).slice(-8000);
+            logger.warn(`Spotify match search: ${text.trim()}`);
+        });
         ytdlp.on('error', error => {
             clearTimeout(timeout);
             signal?.removeEventListener('abort', onAbort);
+            stageTimer.end('failed', { code: 'INTERNAL' });
             reject(error);
         });
         ytdlp.on('close', code => {
             clearTimeout(timeout);
             signal?.removeEventListener('abort', onAbort);
-            if (signal?.aborted) return reject(new Error('Request cancelled.'));
-            if (timedOut) return reject(new Error('Spotify match search timed out.'));
-            if (outputBytes > 2 * 1024 * 1024) return reject(new Error('Spotify match search returned too much data.'));
-            if (code !== 0 || !output.trim()) return resolve([]);
+            if (signal?.aborted) {
+                stageTimer.end('failed', { code: 'CANCELLED' });
+                return reject(new AppError('CANCELLED'));
+            }
+            if (timedOut) {
+                stageTimer.end('failed', { code: 'TIMEOUT' });
+                return reject(new AppError('TIMEOUT', { userMessage: 'Spotify match search timed out.' }));
+            }
+            if (outputBytes > 2 * 1024 * 1024) {
+                stageTimer.end('failed', { code: 'TOO_LARGE' });
+                return reject(new AppError('TOO_LARGE', { userMessage: 'Spotify match search returned too much data.' }));
+            }
+            if (code !== 0 || !output.trim()) {
+                stageTimer.end('failed', { code: 'NO_MATCH' });
+                return resolve([]);
+            }
             try {
                 const data = JSON.parse(output);
+                stageTimer.end('ok');
                 resolve(Array.isArray(data.entries) ? data.entries : [data]);
             } catch {
+                stageTimer.end('failed', { code: 'INTERNAL' });
                 resolve([]);
             }
         });
     });
 }
 
-async function findSpotifyMatch(track, signal) {
+async function findSpotifyMatch(track, signal, logger = Logger) {
     // Spotify to YouTube matching configuration:
     // Declared here for easy tuning without environment variables
     const MATCH_THRESHOLD = 0.58;       // Minimum confidence score (0.0 - 1.0) required to accept a YouTube candidate
@@ -1549,7 +1719,7 @@ async function findSpotifyMatch(track, signal) {
 
     for (let i = 0; i < queries.length; i++) {
         const query = queries[i];
-        const entries = await searchYouTubeCandidates(query, MAX_CANDIDATES_PER_QUERY, signal);
+        const entries = await searchYouTubeCandidates(query, MAX_CANDIDATES_PER_QUERY, signal, logger);
         for (const entry of entries) {
             const id = entry?.id || entry?.url;
             if (id && !seenIds.has(id)) {
@@ -1973,7 +2143,8 @@ async function getSpotifyData(url, signal) {
 }
 
 // download the raw audio stream to a temp file using yt-dlp
-async function downloadToTemp(targetUrl, extension = 'webm', signal, targetFormat, onProgress) {
+async function downloadToTemp(targetUrl, extension = 'webm', signal, targetFormat, onProgress, logger = Logger) {
+    const stageTimer = startStage(logger, 'download');
     const tempPath = path.join(WORK_DIR, `ripcord_${randomUUID()}.${extension}`);
     await ytdlpSemaphore.acquire(signal);
 
@@ -2025,7 +2196,7 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal, targetForma
             ytdlp.stderr.on('data', (data) => {
                 const text = data.toString();
                 stderr = (stderr + text).slice(-8000);
-                Logger.warn(`yt-dlp: ${text.trim()}`);
+                logger.warn(`yt-dlp: ${text.trim()}`);
             });
 
             ytdlp.on('close', (code) => {
@@ -2033,18 +2204,23 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal, targetForma
                 signal?.removeEventListener('abort', onAbort);
                 if (signal?.aborted) {
                     cleanupFiles([tempPath]);
+                    stageTimer.end('failed', { code: 'CANCELLED' });
                     reject(new AppError('CANCELLED'));
                 } else if (timedOut) {
                     cleanupFiles([tempPath]);
+                    stageTimer.end('failed', { code: 'TIMEOUT' });
                     reject(new AppError('TIMEOUT', { userMessage: 'Audio download timed out.' }));
                 } else if (code === 0 && fs.existsSync(tempPath) && fs.statSync(tempPath).size <= MAX_DOWNLOAD_BYTES) {
+                    stageTimer.end('ok');
                     resolve(tempPath);
                 } else {
                     cleanupFiles([tempPath]);
                     const err = new Error('yt-dlp was unable to extract this audio source.');
                     err.stderr = stderr;
                     err.exitCode = code;
-                    reject(classifyError(err, stderr));
+                    const appErr = classifyError(err, stderr);
+                    stageTimer.end('failed', { code: appErr.code });
+                    reject(appErr);
                 }
             });
 
@@ -2053,7 +2229,9 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal, targetForma
                 signal?.removeEventListener('abort', onAbort);
                 cleanupFiles([tempPath]);
                 err.stderr = stderr;
-                reject(classifyError(err, stderr));
+                const appErr = classifyError(err, stderr);
+                stageTimer.end('failed', { code: appErr.code });
+                reject(appErr);
             });
         });
     } finally {
@@ -2061,11 +2239,15 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal, targetForma
     }
 }
 
-async function runFfmpeg(args, timeoutMessage, signal) {
+async function runFfmpeg(args, timeoutMessage, signal, logger = Logger) {
+    const stageTimer = startStage(logger, 'encode');
     await ffmpegSemaphore.acquire(signal);
     try {
         return await new Promise((resolve, reject) => {
-            if (signal?.aborted) return reject(new AppError('CANCELLED'));
+            if (signal?.aborted) {
+                stageTimer.end('failed', { code: 'CANCELLED' });
+                return reject(new AppError('CANCELLED'));
+            }
 
             const ff = spawn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
             let timedOut = false;
@@ -2081,20 +2263,30 @@ async function runFfmpeg(args, timeoutMessage, signal) {
                 clearTimeout(timeout);
                 signal?.removeEventListener('abort', onAbort);
                 error.stderr = stderr;
-                reject(classifyError(error, stderr));
+                const appErr = classifyError(error, stderr);
+                stageTimer.end('failed', { code: appErr.code });
+                reject(appErr);
             });
             ff.on('close', code => {
                 clearTimeout(timeout);
                 signal?.removeEventListener('abort', onAbort);
-                if (signal?.aborted) reject(new AppError('CANCELLED'));
-                else if (timedOut) reject(new AppError('TIMEOUT', { userMessage: timeoutMessage }));
-                else if (code !== 0) {
+                if (signal?.aborted) {
+                    stageTimer.end('failed', { code: 'CANCELLED' });
+                    reject(new AppError('CANCELLED'));
+                } else if (timedOut) {
+                    stageTimer.end('failed', { code: 'TIMEOUT' });
+                    reject(new AppError('TIMEOUT', { userMessage: timeoutMessage }));
+                } else if (code !== 0) {
                     const err = new Error('FFmpeg encoding failed.');
                     err.stderr = stderr;
                     err.exitCode = code;
-                    reject(classifyError(err, stderr));
+                    const appErr = classifyError(err, stderr);
+                    stageTimer.end('failed', { code: appErr.code });
+                    reject(appErr);
+                } else {
+                    stageTimer.end('ok');
+                    resolve();
                 }
-                else resolve();
             });
         });
     } finally {
@@ -2129,7 +2321,8 @@ function ffmpegEncodeArgs(audioPath, outputPath, format, bitrate, coverPath, tit
     return args;
 }
 
-function probeAudioCodec(filePath) {
+function probeAudioCodec(filePath, logger = Logger) {
+    const stageTimer = startStage(logger, 'probe');
     return new Promise(resolve => {
         const proc = spawn(ffprobePath, [
             '-v', 'error',
@@ -2144,20 +2337,27 @@ function probeAudioCodec(filePath) {
         proc.stdout.on('data', data => { output += data.toString(); });
         proc.on('error', () => {
             clearTimeout(timer);
+            stageTimer.end('failed');
             resolve(null);
         });
         proc.on('close', code => {
             clearTimeout(timer);
-            if (code === 0) resolve(output.trim() || null);
-            else resolve(null);
+            if (code === 0) {
+                stageTimer.end('ok');
+                resolve(output.trim() || null);
+            } else {
+                stageTimer.end('failed');
+                resolve(null);
+            }
         });
     });
 }
 
 // attach album cover art to ogg files
-async function injectVorbisCoverArt(filePath, imgPath, format) {
+async function injectVorbisCoverArt(filePath, imgPath, format, logger = Logger) {
     if (format !== 'ogg') return false;
     if (!fs.existsSync(imgPath) || !fs.existsSync(filePath)) return false;
+    const stageTimer = startStage(logger, 'tag');
 
     try {
         const imgBuffer = fs.readFileSync(imgPath);
@@ -2209,14 +2409,16 @@ async function injectVorbisCoverArt(filePath, imgPath, format) {
             proc.stdin.end();
         });
 
+        stageTimer.end('ok');
         return true;
     } catch {
+        stageTimer.end('failed');
         return false;
     }
 }
 
 // transcode the audio with ffmpeg and stream it directly to the user
-async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res, filename = '', artist = '', signal) {
+async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res, filename = '', artist = '', signal, req = null, logger = Logger) {
     const tempFiles = [];
 
     // clean up temp files if the user closes their browser or cancels
@@ -2224,8 +2426,8 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
     res.on('close', onDisconnect);
 
     try {
-        Logger.info('Downloading validated audio source');
-        const tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format);
+        logger.info('Downloading validated audio source');
+        const tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format, undefined, logger);
         tempFiles.push(tempAudioPath);
 
         let tempImgPath = '';
@@ -2246,30 +2448,30 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
                     tempFiles.push(tempImgPath);
                 }
             } catch (imgErr) {
-                Logger.warn(`Cover art fetch omitted: ${imgErr.message}`);
+                logger.warn(`Cover art fetch omitted: ${imgErr.message}`);
             }
         }
 
         const tempOutPath = path.join(WORK_DIR, `out_${randomUUID()}.${format}`);
         tempFiles.push(tempOutPath);
 
-        const sourceCodec = await probeAudioCodec(tempAudioPath);
+        const sourceCodec = await probeAudioCodec(tempAudioPath, logger);
         const copyAudio = (format === 'ogg' && sourceCodec === 'opus') || (format === 'm4a' && sourceCodec === 'aac');
-        Logger.info(copyAudio
+        logger.info(copyAudio
             ? `Remuxing ${sourceCodec} audio into [${format.toUpperCase()}]`
             : `Encoding audio to [${format.toUpperCase()}] at ${bitrate} kbps`);
         const args = ffmpegEncodeArgs(tempAudioPath, tempOutPath, format, bitrate, tempImgPath, filename || 'Track', artist || 'Unknown Artist', MAX_AUDIO_OUTPUT_BYTES, copyAudio);
-        await runFfmpeg(args, 'Audio encoding timed out.', signal);
-        if (signal?.aborted) throw new Error('Request cancelled.');
-        if (fs.statSync(tempOutPath).size >= MAX_AUDIO_OUTPUT_BYTES) throw new Error('Audio output exceeds the allowed size.');
+        await runFfmpeg(args, 'Audio encoding timed out.', signal, logger);
+        if (signal?.aborted) throw new AppError('CANCELLED');
+        if (fs.statSync(tempOutPath).size >= MAX_AUDIO_OUTPUT_BYTES) throw new AppError('TOO_LARGE', { userMessage: 'Audio output exceeds the allowed size.' });
 
         if (tempImgPath && fs.existsSync(tempOutPath) && format === 'ogg') {
-            await injectVorbisCoverArt(tempOutPath, tempImgPath, format);
+            await injectVorbisCoverArt(tempOutPath, tempImgPath, format, logger);
         }
 
-        Logger.success(`Encoding complete. Streaming ${format.toUpperCase()} to client`);
+        logger.success(`Encoding complete. Streaming ${format.toUpperCase()} to client`);
         const fileStat = fs.statSync(tempOutPath);
-        if (fileStat.size > MAX_AUDIO_OUTPUT_BYTES) throw new Error('Audio output exceeds the allowed size.');
+        if (fileStat.size > MAX_AUDIO_OUTPUT_BYTES) throw new AppError('TOO_LARGE', { userMessage: 'Audio output exceeds the allowed size.' });
         res.setHeader('Content-Length', fileStat.size);
 
         const readStream = fs.createReadStream(tempOutPath);
@@ -2283,7 +2485,7 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
 
     } catch (error) {
         const appErr = classifyError(error, error?.stderr || '');
-        Logger.error(`Audio processing error: [${appErr.code}] ${appErr.message}`);
+        logger.error(`Audio processing error: [${appErr.code}] ${appErr.message}`);
         res.removeListener('close', onDisconnect);
         cleanupFiles(tempFiles);
         if (!res.headersSent) {
@@ -2293,26 +2495,27 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
     }
 }
 
-async function downloadPlaylistTrack(track, index, audioFormat, signal, report = () => { }) {
+async function downloadPlaylistTrack(track, index, audioFormat, signal, report = () => { }, logger = Logger) {
+    const trackLogger = logger.child({ trackIndex: index });
     const tempFiles = [];
 
     try {
         report(index, { state: 'matching', progress: 0 });
         const title = String(track.title || 'Unknown Track').slice(0, 200);
         const artist = String(track.artist || 'Unknown Artist').slice(0, 200);
-        Logger.info(`[Track ${index + 1}] Downloading: ${sanitizeAsciiHeader(`${title} - ${artist}`)}`);
+        trackLogger.info(`Downloading track: ${sanitizeAsciiHeader(`${title} - ${artist}`)}`);
 
         let downloadTarget;
         if (track.url) {
             if (!isSafeUrl(track.url)) throw new Error('Invalid playlist track URL.');
             downloadTarget = track.url;
         } else {
-            downloadTarget = await findSpotifyMatch({ ...track, title, artist }, signal);
+            downloadTarget = await findSpotifyMatch({ ...track, title, artist }, signal, trackLogger);
         }
 
         report(index, { state: 'downloading', progress: 0 });
         const downloadPromise = downloadToTemp(downloadTarget, audioFormat === 'm4a' ? 'm4a' : 'webm', signal, audioFormat,
-            fraction => report(index, { state: 'downloading', progress: fraction }));
+            fraction => report(index, { state: 'downloading', progress: fraction }), trackLogger);
         let tempImgPath = '';
         const safeThumbnail = parseCoverUrl(track.thumbnail);
 
@@ -2339,7 +2542,7 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal, report =
         return { track, index, title, artist, tempAudioPath, tempImgPath };
     } catch (err) {
         const appErr = classifyError(err, err?.stderr || '');
-        Logger.error(`[Track ${index + 1}] FAILED: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - [${appErr.code}] ${appErr.message}`);
+        trackLogger.error(`Track failed: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - [${appErr.code}] ${appErr.message}`);
         report(index, { state: 'failed', progress: 1, error: appErr.userMessage, code: appErr.code });
         cleanupFiles(tempFiles);
         return null;
@@ -2347,28 +2550,29 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal, report =
 }
 
 // convert one downloaded song so it can be added to the zip file
-async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, report = () => { }) {
+async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, report = () => { }, logger = Logger) {
     const { track, index, title, artist, tempAudioPath, tempImgPath } = source;
+    const trackLogger = logger.child({ trackIndex: index });
     const tempFiles = [tempAudioPath, tempImgPath].filter(Boolean);
 
     try {
         report(index, { state: 'encoding', progress: 0 });
-        Logger.info(`[Track ${index + 1}] Encoding: ${sanitizeAsciiHeader(`${title} - ${artist}`)}`);
+        trackLogger.info(`Encoding track: ${sanitizeAsciiHeader(`${title} - ${artist}`)}`);
         const tempOutPath = path.join(WORK_DIR, `track_${randomUUID()}.${audioFormat}`);
         tempFiles.push(tempOutPath);
 
-        const sourceCodec = await probeAudioCodec(tempAudioPath);
+        const sourceCodec = await probeAudioCodec(tempAudioPath, trackLogger);
         const copyAudio = (audioFormat === 'ogg' && sourceCodec === 'opus') || (audioFormat === 'm4a' && sourceCodec === 'aac');
-        Logger.info(copyAudio
-            ? `[Track ${index + 1}] Remuxing ${sourceCodec} audio into [${audioFormat.toUpperCase()}]`
-            : `[Track ${index + 1}] Encoding audio to [${audioFormat.toUpperCase()}] at ${audioBitrate} kbps`);
+        trackLogger.info(copyAudio
+            ? `Remuxing ${sourceCodec} audio into [${audioFormat.toUpperCase()}]`
+            : `Encoding audio to [${audioFormat.toUpperCase()}] at ${audioBitrate} kbps`);
         const args = ffmpegEncodeArgs(tempAudioPath, tempOutPath, audioFormat, audioBitrate, tempImgPath, title, artist, zipTrackLimit(audioFormat), copyAudio);
-        await runFfmpeg(args, 'Track encoding timed out.', signal);
+        await runFfmpeg(args, 'Track encoding timed out.', signal, trackLogger);
         if (signal?.aborted) throw new AppError('CANCELLED');
         if (fs.statSync(tempOutPath).size >= zipTrackLimit(audioFormat)) throw new AppError('TOO_LARGE', { userMessage: 'Playlist track exceeds the allowed size.' });
 
         if (tempImgPath && fs.existsSync(tempOutPath) && audioFormat === 'ogg') {
-            await injectVorbisCoverArt(tempOutPath, tempImgPath, audioFormat);
+            await injectVorbisCoverArt(tempOutPath, tempImgPath, audioFormat, trackLogger);
         }
 
         if (fs.statSync(tempOutPath).size > zipTrackLimit(audioFormat)) throw new AppError('TOO_LARGE', { userMessage: 'Playlist track exceeds the allowed size.' });
@@ -2380,7 +2584,7 @@ async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, r
 
     } catch (err) {
         const appErr = classifyError(err, err?.stderr || '');
-        Logger.error(`[Track ${index + 1}] FAILED: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - [${appErr.code}] ${appErr.message}`);
+        trackLogger.error(`Track encode failed: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - [${appErr.code}] ${appErr.message}`);
         report(index, { state: 'failed', progress: 1, error: appErr.userMessage, code: appErr.code });
         cleanupFiles(tempFiles);
         return null;
@@ -2389,8 +2593,12 @@ async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, r
 
 // worker function that processes the actual download request
 async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId = null, customTitle = '', req = null) {
+    const taskLogger = (req?.logger || Logger).child({ jobId: jobId || randomUUID() });
+    const jobStartTime = Date.now();
+    let job = null;
+
     try {
-        Logger.info(`Task started (${audioFormat.toUpperCase()})`);
+        taskLogger.info(`Task started (${audioFormat.toUpperCase()})`);
         if (signal.aborted) return;
 
         const spotifyLink = spotifyLinkDetails(url);
@@ -2411,7 +2619,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             res.setHeader('Content-Type', mimeType);
             const info = await getYoutubeInfo(url, signal);
             const trackTitle = customTitle || info.title;
-            await processAndStreamAudio(url, audioBitrate, audioFormat, info.thumbnail, res, trackTitle, info.author, signal, req);
+            await processAndStreamAudio(url, audioBitrate, audioFormat, info.thumbnail, res, trackTitle, info.author, signal, req, taskLogger);
             return;
         }
 
@@ -2421,19 +2629,19 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             res.setHeader('Content-Type', mimeType);
             const spotifyData = await getSpotifyData(url, signal);
             const track = spotifyData.tracks[0];
-            const matchUrl = await findSpotifyMatch(track, signal);
+            const matchUrl = await findSpotifyMatch(track, signal, taskLogger);
             const trackTitle = customTitle || track.title;
-            await processAndStreamAudio(matchUrl, audioBitrate, audioFormat, track.thumbnail, res, trackTitle, track.artist, signal, req);
+            await processAndStreamAudio(matchUrl, audioBitrate, audioFormat, track.thumbnail, res, trackTitle, track.artist, signal, req, taskLogger);
             return;
         }
 
         // download full playlists or albums as a zip
         let collectionData = null;
         if (isYouTubePlaylist(url)) {
-            Logger.info('Fetching YouTube playlist items');
+            taskLogger.info('Fetching YouTube playlist items');
             collectionData = await getYoutubePlaylistData(url, signal);
         } else if (spotifyLink && spotifyLink.type !== 'track') {
-            Logger.info('Fetching Spotify collection items');
+            taskLogger.info('Fetching Spotify collection items');
             collectionData = await getSpotifyData(url, signal);
         }
 
@@ -2446,7 +2654,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             const archive = new ZipArchive({ store: true });
             archive.pipe(res);
 
-            archive.on('warning', (err) => Logger.warn(`ZIP archive warning: ${err.message}`));
+            archive.on('warning', (err) => taskLogger.warn(`ZIP archive warning: ${err.message}`));
             const trackFilePaths = new Set();
             const archiveFilePaths = new Map();
             const cleanupTrackFiles = () => {
@@ -2463,7 +2671,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                 }
             });
             archive.on('error', (err) => {
-                Logger.error(`ZIP archive error: ${err.message}`);
+                taskLogger.error(`ZIP archive error: ${err.message}`);
                 cleanupTrackFiles();
                 if (!res.destroyed) res.destroy(err);
             });
@@ -2479,7 +2687,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
 
             const tracks = collectionData.tracks.slice(0, MAX_PLAYLIST_TRACKS);
             let addedTracks = 0;
-            const job = createJob(jobId, tracks);
+            job = createJob(jobId, tracks);
             const report = (index, patch) => {
                 if (job?.tracks[index]) Object.assign(job.tracks[index], patch);
             };
@@ -2491,7 +2699,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                     while (!signal.aborted) {
                         const index = nextTrack++;
                         if (index >= tracks.length) return;
-                        const downloaded = await downloadPlaylistTrack(tracks[index], index, audioFormat, signal, report);
+                        const downloaded = await downloadPlaylistTrack(tracks[index], index, audioFormat, signal, report, taskLogger);
                         if (!downloaded) continue;
                         try {
                             await handoffQueue.push(downloaded);
@@ -2505,7 +2713,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                     while (!signal.aborted) {
                         const downloaded = await handoffQueue.shift();
                         if (!downloaded) return;
-                        const result = await processPlaylistTrack(downloaded, audioBitrate, audioFormat, signal, report);
+                        const result = await processPlaylistTrack(downloaded, audioBitrate, audioFormat, signal, report, taskLogger);
                         if (signal.aborted) {
                             if (result?.filePath) cleanupFiles([result.filePath]);
                             return;
@@ -2531,9 +2739,13 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                     endJob(jobId, 'failed', noMatchErr);
                     throw noMatchErr;
                 }
+
+                const zipTimer = startStage(taskLogger, 'zip');
                 await archive.finalize();
+                zipTimer.end('ok');
+
                 endJob(jobId, 'finished');
-                Logger.success(`Archive completed: ${zipName}`);
+                taskLogger.success(`Archive completed: ${zipName}`);
             } catch (jobErr) {
                 const appErr = classifyError(jobErr, jobErr?.stderr || '');
                 if (job?.status === 'running') endJob(jobId, signal.aborted ? 'cancelled' : 'failed', appErr);
@@ -2552,10 +2764,30 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
 
     } catch (error) {
         const appErr = classifyError(error, error?.stderr || '');
-        Logger.error(`Queue execution error: [${appErr.code}] ${appErr.message}`);
+        taskLogger.error(`Queue execution error: [${appErr.code}] ${appErr.message}`);
         if (!res.headersSent) {
             sendError(res, appErr, req);
         } else if (!res.destroyed) res.destroy();
+    } finally {
+        if (job) {
+            const jobTotalMs = Date.now() - jobStartTime;
+            const okCount = job.tracks.filter(t => t.state === 'done').length;
+            const failedTracks = job.tracks.filter(t => t.state === 'failed');
+            const failedCount = failedTracks.length;
+            const failedByCode = {};
+            for (const t of failedTracks) {
+                const c = t.code || 'UNKNOWN';
+                failedByCode[c] = (failedByCode[c] || 0) + 1;
+            }
+            const failureDetail = Object.entries(failedByCode).map(([c, n]) => `${n} ${c}`).join(', ');
+            taskLogger.info(`Job summary: ${okCount} ok, ${failedCount} failed${failureDetail ? `: ${failureDetail}` : ''} (${jobTotalMs}ms total)`, {
+                stage: 'job_summary',
+                durationMs: jobTotalMs,
+                okCount,
+                failedCount,
+                failures: failedByCode
+            });
+        }
     }
 }
 
@@ -2843,5 +3075,8 @@ module.exports = {
     AppError,
     ERROR_DEFINITIONS,
     classifyError,
-    sendError
+    sendError,
+    StructuredLogger,
+    Logger,
+    redactLog
 };
