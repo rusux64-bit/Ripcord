@@ -1,12 +1,13 @@
 name: Docker Publish
 
 on:
-  release:
-    types: [published]
-  push:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches:
       - main
-      - master
+  release:
+    types: [published]
   workflow_dispatch:
 
 env:
@@ -15,6 +16,10 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    if: >-
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      github.event_name == 'release' ||
+      github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
       packages: write
@@ -22,6 +27,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Set lowercased image name
         run: |
@@ -46,7 +53,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'release' }}
+            type=raw,value=latest,enable=${{ github.event.workflow_run.head_branch == 'main' || github.ref == 'refs/heads/main' || github.event_name == 'release' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
