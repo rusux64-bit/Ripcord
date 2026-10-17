@@ -204,6 +204,8 @@ function startStage(logger, stage, meta = {}) {
             const durationMs = Date.now() - start;
             if (status === 'ok') {
                 stageLogger.info(`Stage completed: ${stage}`, { durationMs, ...extra });
+            } else if (extra?.code === 'CANCELLED') {
+                stageLogger.info(`Stage cancelled: ${stage}`, { durationMs, ...extra });
             } else {
                 stageLogger.warn(`Stage failed: ${stage}`, { durationMs, ...extra });
             }
@@ -375,7 +377,7 @@ class AppError extends Error {
 const CLASSIFIER_RULES = [
     {
         code: 'CANCELLED',
-        test: (combined, err) => err?.name === 'AbortError' || err?.code === 'ERR_CANCELED' || /request cancelled|request aborted|abort\(|aborted/i.test(combined)
+        test: (combined, err) => err?.name === 'AbortError' || err?.code === 'ERR_CANCELED' || err?.code === 'CANCELLED' || /request cancelled|request aborted|abort\(|aborted/i.test(combined)
     },
     {
         code: 'RATE_LIMITED',
@@ -573,8 +575,10 @@ function sweepWorkDir(staleOnly = true) {
 const cleanupStaleWorkFiles = () => sweepWorkDir(true);
 cleanupStaleWorkFiles();
 
+const downloadMetaMap = new Map();
+
 if (COOKIES_PATH) {
-    Logger.info(`Using yt-dlp cookies from: ${COOKIES_PATH}`);
+    Logger.warn(`Global yt-dlp cookies configured (${COOKIES_PATH}). Global cookies slow M4A/OGG fast paths by forcing authed player clients and JS challenge solving.`);
 }
 
 const AGE_GATE_COOKIES_ENABLED = ['1', 'true', 'on', 'yes'].includes(String(process.env.AGE_GATE_COOKIES || 'off').toLowerCase().trim());
@@ -841,7 +845,12 @@ class DownloadQueue {
         }
 
         Promise.resolve(entry.task(entry.controller.signal))
-            .catch(err => Logger.error(`[Queue] Task failed: ${err.message}`))
+            .catch(err => {
+                const appErr = classifyError(err, err?.stderr || '');
+                if (appErr.code !== 'CANCELLED' && !entry.controller.signal.aborted) {
+                    Logger.error(`[Queue] Task failed: ${err.message}`);
+                }
+            })
             .finally(() => {
                 entry.res.removeListener('close', entry.onClose);
                 this.activeEntries.delete(entry);
@@ -2053,13 +2062,11 @@ async function searchYouTubeCandidates(query, maxCandidates, signal, logger = Lo
     const searchTarget = `ytsearch${maxCandidates}:${query}`;
     const args = [
         '--ignore-config',
-        '--js-runtimes', 'node',
-        '--dump-single-json', '--flat-playlist', '--skip-download', '--no-warnings'
+        '--dump-single-json', '--flat-playlist', '--skip-download', '--no-warnings',
+        '--extractor-args', 'youtube:player_client=android,web'
     ];
     if (COOKIES_PATH) {
         args.push('--cookies', COOKIES_PATH);
-    } else {
-        args.push('--extractor-args', 'youtube:player_client=android,web');
     }
     args.push('--', searchTarget);
 
@@ -2276,28 +2283,43 @@ async function downloadSpotifyAudioWithFallback({
         }
     }
 
-    if (ageGateCookiePool.isEnabled() && lastError?.code === 'AGE_RESTRICTED') {
+    if (lastError?.code === 'AGE_RESTRICTED') {
         const topCandidate = candidates[0];
-        logger.info(`Spotify age-gate fallback: all non-cookie attempts failed; retrying top candidate [${topCandidate.videoId}] with age-gate cookie account`);
-        const lease = await ageGateCookiePool.acquire();
-        if (lease) {
-            try {
-                const candidateUrl = `https://www.youtube.com/watch?v=${topCandidate.videoId}`;
-                const tempAudioPath = await downloadToTemp(
-                    candidateUrl,
-                    audioFormat === 'm4a' ? 'm4a' : 'webm',
-                    signal,
-                    audioFormat,
-                    onProgress,
-                    logger,
-                    lease.cookiePath
-                );
-                lease.release(true);
-                return { tempAudioPath, candidate: topCandidate, alternateUsed: false };
-            } catch (cookieErr) {
-                lease.release(false, cookieErr);
-                throw cookieErr;
+        if (ageGateCookiePool.isEnabled()) {
+            logger.info(`Spotify age-gate fallback: all non-cookie attempts failed; retrying top candidate [${topCandidate.videoId}] with age-gate cookie account`);
+            const lease = await ageGateCookiePool.acquire();
+            if (lease) {
+                try {
+                    const candidateUrl = `https://www.youtube.com/watch?v=${topCandidate.videoId}`;
+                    const tempAudioPath = await downloadToTemp(
+                        candidateUrl,
+                        audioFormat === 'm4a' ? 'm4a' : 'webm',
+                        signal,
+                        audioFormat,
+                        onProgress,
+                        logger,
+                        lease.cookiePath
+                    );
+                    lease.release(true);
+                    return { tempAudioPath, candidate: topCandidate, alternateUsed: false };
+                } catch (cookieErr) {
+                    lease.release(false, cookieErr);
+                    throw cookieErr;
+                }
             }
+        } else if (COOKIES_PATH) {
+            logger.info(`Spotify age-gate fallback: all non-cookie attempts failed; retrying top candidate [${topCandidate.videoId}] with fallback cookies`);
+            const candidateUrl = `https://www.youtube.com/watch?v=${topCandidate.videoId}`;
+            const tempAudioPath = await downloadToTemp(
+                candidateUrl,
+                audioFormat === 'm4a' ? 'm4a' : 'webm',
+                signal,
+                audioFormat,
+                onProgress,
+                logger,
+                COOKIES_PATH
+            );
+            return { tempAudioPath, candidate: topCandidate, alternateUsed: false };
         }
     }
 
@@ -2354,8 +2376,10 @@ function buildContentDisposition(baseName, extension) {
 function cleanupFiles(files) {
     if (!Array.isArray(files)) return;
     files.forEach(file => {
+        if (!file) return;
+        downloadMetaMap.delete(file);
         try {
-            if (file && fs.existsSync(file)) {
+            if (fs.existsSync(file)) {
                 fs.unlinkSync(file);
             }
         } catch (e) {
@@ -2490,13 +2514,13 @@ async function getYoutubePlaylistData(url, signal, cookiePathOverride = null) {
     return new Promise((resolve, reject) => {
         const ytdlpArgs = [
             '--ignore-config',
-            '--js-runtimes', 'node',
             '--flat-playlist',
             '--print', '%(playlist_title)s:::%(id)s:::%(title)s:::%(uploader)s',
             '--ignore-errors',
             '--no-abort-on-error',
             '--no-warnings',
-            '--playlist-end', String(MAX_PLAYLIST_TRACKS)
+            '--playlist-end', String(MAX_PLAYLIST_TRACKS),
+            '--extractor-args', 'youtube:player_client=android,web'
         ];
 
         if (cookiePathOverride) {
@@ -2756,23 +2780,28 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal, targetForma
     try {
         return await new Promise((resolve, reject) => {
             const formatSelector = targetFormat === 'ogg'
-                ? 'bestaudio[acodec=opus]/bestaudio/best'
-                : targetFormat === 'm4a' ? 'bestaudio[acodec=aac]/bestaudio/best' : 'bestaudio/best';
+                ? 'bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio/best'
+                : targetFormat === 'm4a'
+                    ? 'bestaudio[acodec^=mp4a]/bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best'
+                    : 'bestaudio/best';
             const ytdlpArgs = [
                 '--ignore-config',
-                '--js-runtimes', 'node',
                 '-f', formatSelector,
                 '--no-playlist',
                 '--no-warnings',
                 '--max-filesize', `${Math.floor(MAX_DOWNLOAD_BYTES / (1024 * 1024))}M`,
-                '--concurrent-fragments', String(YTDLP_CONCURRENT_FRAGMENTS)
+                '--concurrent-fragments', String(YTDLP_CONCURRENT_FRAGMENTS),
+                '--print', 'before_dl:RIPCORD_INFO %(format_id)s'
             ];
 
-            const activeCookiePath = cookiePathOverride || COOKIES_PATH;
-            if (activeCookiePath) {
-                ytdlpArgs.push('--cookies', activeCookiePath);
+            let chosenClient = 'visionos,android,web';
+            if (cookiePathOverride) {
+                chosenClient = 'web_embedded,web';
+                ytdlpArgs.push('--cookies', cookiePathOverride);
+                ytdlpArgs.push('--js-runtimes', 'node');
+                ytdlpArgs.push('--extractor-args', `youtube:player_client=${chosenClient}`);
             } else {
-                ytdlpArgs.push('--extractor-args', 'youtube:player_client=android,web');
+                ytdlpArgs.push('--extractor-args', `youtube:player_client=${chosenClient}`);
             }
 
             if (YTDLP_USE_ARIA2C && aria2cAvailable) ytdlpArgs.push('--downloader', 'aria2c');
@@ -2785,9 +2814,15 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal, targetForma
             ytdlpArgs.push('-o', tempPath, '--', canonicalTarget);
 
             const ytdlp = spawn('yt-dlp', ytdlpArgs);
+            let detectedFormatId = 'unknown';
+            let detectedClient = chosenClient;
+
             ytdlp.stdout.on('data', chunk => {
+                const text = chunk.toString();
+                const infoMatch = text.match(/RIPCORD_INFO\s+(\S+)/);
+                if (infoMatch) detectedFormatId = infoMatch[1];
                 if (!onProgress) return;
-                const matches = [...chunk.toString().matchAll(/RIPCORD_PROGRESS (\d+) (\d+(?:\.\d+)?)/g)];
+                const matches = [...text.matchAll(/RIPCORD_PROGRESS (\d+) (\d+(?:\.\d+)?)/g)];
                 const last = matches[matches.length - 1];
                 if (last && Number(last[2]) > 0) onProgress(Math.min(1, Number(last[1]) / Number(last[2])));
             });
@@ -2805,6 +2840,8 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal, targetForma
             ytdlp.stderr.on('data', (data) => {
                 const text = data.toString();
                 stderr = (stderr + text).slice(-8000);
+                const clientMatch = text.match(/Downloading\s+(\w+)\s+player API JSON/i);
+                if (clientMatch) detectedClient = clientMatch[1];
                 logger.warn(`yt-dlp: ${text.trim()}`);
             });
 
@@ -2820,6 +2857,7 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal, targetForma
                     stageTimer.end('failed', { code: 'TIMEOUT' });
                     reject(new AppError('TIMEOUT', { userMessage: 'Audio download timed out.' }));
                 } else if (code === 0 && fs.existsSync(tempPath) && fs.statSync(tempPath).size <= MAX_DOWNLOAD_BYTES) {
+                    downloadMetaMap.set(tempPath, { formatId: detectedFormatId, client: detectedClient });
                     stageTimer.end('ok');
                     resolve(tempPath);
                 } else {
@@ -3045,19 +3083,27 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
                 tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format, undefined, logger);
                 tempFiles.push(tempAudioPath);
             } catch (err) {
-                if (err?.code === 'AGE_RESTRICTED' && ageGateCookiePool.isEnabled()) {
-                    logger.info('Track is age-restricted, acquiring age-gate cookie account for automatic retry');
-                    const lease = await ageGateCookiePool.acquire();
-                    if (!lease) {
-                        throw new AppError('AGE_RESTRICTED');
-                    }
-                    try {
-                        tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format, undefined, logger, lease.cookiePath);
+                if (err?.code === 'AGE_RESTRICTED') {
+                    if (ageGateCookiePool.isEnabled()) {
+                        logger.info('Track is age-restricted, acquiring age-gate cookie account for automatic retry');
+                        const lease = await ageGateCookiePool.acquire();
+                        if (!lease) {
+                            throw new AppError('AGE_RESTRICTED');
+                        }
+                        try {
+                            tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format, undefined, logger, lease.cookiePath);
+                            tempFiles.push(tempAudioPath);
+                            lease.release(true);
+                        } catch (cookieErr) {
+                            lease.release(false, cookieErr);
+                            throw cookieErr;
+                        }
+                    } else if (COOKIES_PATH) {
+                        logger.info('Track is age-restricted, retrying with fallback cookies');
+                        tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format, undefined, logger, COOKIES_PATH);
                         tempFiles.push(tempAudioPath);
-                        lease.release(true);
-                    } catch (cookieErr) {
-                        lease.release(false, cookieErr);
-                        throw cookieErr;
+                    } else {
+                        throw err;
                     }
                 } else {
                     throw err;
@@ -3101,10 +3147,15 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
         tempFiles.push(tempOutPath);
 
         const sourceCodec = await probeAudioCodec(tempAudioPath, logger);
+        const meta = downloadMetaMap.get(tempAudioPath) || {};
         const copyAudio = (format === 'ogg' && sourceCodec === 'opus') || (format === 'm4a' && sourceCodec === 'aac');
+        if (!copyAudio && (format === 'm4a' || format === 'ogg')) {
+            const expectedCodec = format === 'm4a' ? 'aac' : 'opus';
+            logger.info(`Source audio codec '${sourceCodec || 'unknown'}' from format [${meta.formatId || 'unknown'}] via client [${meta.client || 'unknown'}] cannot be remuxed to ${format.toUpperCase()}; transcoding required (expected ${expectedCodec}).`);
+        }
         logger.info(copyAudio
             ? `Remuxing ${sourceCodec} audio into [${format.toUpperCase()}]`
-            : `Encoding audio to [${format.toUpperCase()}] at ${bitrate} kbps`);
+            : `Encoding ${sourceCodec || 'audio'} audio to [${format.toUpperCase()}] at ${bitrate} kbps`);
         const args = ffmpegEncodeArgs(tempAudioPath, tempOutPath, format, bitrate, tempImgPath, filename || 'Track', artist || 'Unknown Artist', MAX_AUDIO_OUTPUT_BYTES, copyAudio);
         await runFfmpeg(args, 'Audio encoding timed out.', signal, logger);
         if (signal?.aborted) throw new AppError('CANCELLED');
@@ -3130,7 +3181,9 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
 
     } catch (error) {
         const appErr = classifyError(error, error?.stderr || '');
-        logger.error(`Audio processing error: [${appErr.code}] ${appErr.message}`);
+        if (appErr.code !== 'CANCELLED' && !signal?.aborted && !req?.destroyed) {
+            logger.error(`Audio processing error: [${appErr.code}] ${appErr.message}`);
+        }
         res.removeListener('close', onDisconnect);
         cleanupFiles(tempFiles);
         if (!res.headersSent) {
@@ -3208,18 +3261,27 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal, report =
                     }
                 }
             } catch (err) {
-                if (err?.code === 'AGE_RESTRICTED' && ageGateCookiePool.isEnabled()) {
-                    trackLogger.info('Track is age-restricted, acquiring age-gate cookie account for automatic retry');
-                    const lease = await ageGateCookiePool.acquire();
-                    if (!lease) throw err;
-                    try {
+                if (err?.code === 'AGE_RESTRICTED') {
+                    if (ageGateCookiePool.isEnabled()) {
+                        trackLogger.info('Track is age-restricted, acquiring age-gate cookie account for automatic retry');
+                        const lease = await ageGateCookiePool.acquire();
+                        if (!lease) throw err;
+                        try {
+                            tempAudioPath = await downloadToTemp(track.url, audioFormat === 'm4a' ? 'm4a' : 'webm', signal, audioFormat,
+                                fraction => report(index, { state: 'downloading', progress: fraction }), trackLogger, lease.cookiePath);
+                            tempFiles.push(tempAudioPath);
+                            lease.release(true);
+                        } catch (cookieErr) {
+                            lease.release(false, cookieErr);
+                            throw cookieErr;
+                        }
+                    } else if (COOKIES_PATH) {
+                        trackLogger.info('Track is age-restricted, retrying with fallback cookies');
                         tempAudioPath = await downloadToTemp(track.url, audioFormat === 'm4a' ? 'm4a' : 'webm', signal, audioFormat,
-                            fraction => report(index, { state: 'downloading', progress: fraction }), trackLogger, lease.cookiePath);
+                            fraction => report(index, { state: 'downloading', progress: fraction }), trackLogger, COOKIES_PATH);
                         tempFiles.push(tempAudioPath);
-                        lease.release(true);
-                    } catch (cookieErr) {
-                        lease.release(false, cookieErr);
-                        throw cookieErr;
+                    } else {
+                        throw err;
                     }
                 } else {
                     throw err;
@@ -3290,7 +3352,11 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal, report =
         return { track, index, title, artist, tempAudioPath, tempImgPath, note };
     } catch (err) {
         const appErr = classifyError(err, err?.stderr || '');
-        trackLogger.error(`Track failed: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - [${appErr.code}] ${appErr.message}`);
+        if (appErr.code === 'CANCELLED' || signal?.aborted) {
+            trackLogger.info(`Track download cancelled: [CANCELLED]`);
+        } else {
+            trackLogger.error(`Track failed: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - [${appErr.code}] ${appErr.message}`);
+        }
         report(index, { state: 'failed', progress: 1, error: appErr.userMessage, code: appErr.code });
         cleanupFiles(tempFiles);
         return null;
@@ -3298,7 +3364,7 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal, report =
 }
 
 // convert one downloaded song so it can be added to the zip file
-async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, report = () => { }, logger = Logger) {
+async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, report = () => { }, logger = Logger, job = null) {
     const { track, index, title, artist, tempAudioPath, tempImgPath } = source;
     const trackLogger = logger.child({ trackIndex: index });
     const tempFiles = [tempAudioPath, tempImgPath].filter(Boolean);
@@ -3310,10 +3376,18 @@ async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, r
         tempFiles.push(tempOutPath);
 
         const sourceCodec = await probeAudioCodec(tempAudioPath, trackLogger);
+        const meta = downloadMetaMap.get(tempAudioPath) || {};
         const copyAudio = (audioFormat === 'ogg' && sourceCodec === 'opus') || (audioFormat === 'm4a' && sourceCodec === 'aac');
+        if (!copyAudio && (audioFormat === 'm4a' || audioFormat === 'ogg')) {
+            if (!job || !job.loggedCodecMismatch) {
+                if (job) job.loggedCodecMismatch = true;
+                const expectedCodec = audioFormat === 'm4a' ? 'aac' : 'opus';
+                trackLogger.info(`Source audio codec '${sourceCodec || 'unknown'}' from format [${meta.formatId || 'unknown'}] via client [${meta.client || 'unknown'}] cannot be remuxed to ${audioFormat.toUpperCase()}; transcoding required (expected ${expectedCodec}).`);
+            }
+        }
         trackLogger.info(copyAudio
             ? `Remuxing ${sourceCodec} audio into [${audioFormat.toUpperCase()}]`
-            : `Encoding audio to [${audioFormat.toUpperCase()}] at ${audioBitrate} kbps`);
+            : `Encoding ${sourceCodec || 'audio'} audio to [${audioFormat.toUpperCase()}] at ${audioBitrate} kbps`);
         const args = ffmpegEncodeArgs(tempAudioPath, tempOutPath, audioFormat, audioBitrate, tempImgPath, title, artist, zipTrackLimit(audioFormat), copyAudio);
         await runFfmpeg(args, 'Track encoding timed out.', signal, trackLogger);
         if (signal?.aborted) throw new AppError('CANCELLED');
@@ -3332,7 +3406,11 @@ async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, r
 
     } catch (err) {
         const appErr = classifyError(err, err?.stderr || '');
-        trackLogger.error(`Track encode failed: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - [${appErr.code}] ${appErr.message}`);
+        if (appErr.code === 'CANCELLED' || signal?.aborted) {
+            trackLogger.info(`Track encode cancelled: [CANCELLED]`);
+        } else {
+            trackLogger.error(`Track encode failed: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - [${appErr.code}] ${appErr.message}`);
+        }
         report(index, { state: 'failed', progress: 1, error: appErr.userMessage, code: appErr.code });
         cleanupFiles(tempFiles);
         return null;
@@ -3488,7 +3566,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                     while (!signal.aborted) {
                         const downloaded = await handoffQueue.shift();
                         if (!downloaded) return;
-                        const result = await processPlaylistTrack(downloaded, audioBitrate, audioFormat, signal, report, taskLogger);
+                        const result = await processPlaylistTrack(downloaded, audioBitrate, audioFormat, signal, report, taskLogger, job);
                         if (signal.aborted) {
                             if (result?.filePath) cleanupFiles([result.filePath]);
                             return;
@@ -3539,7 +3617,11 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
 
     } catch (error) {
         const appErr = classifyError(error, error?.stderr || '');
-        taskLogger.error(`Queue execution error: [${appErr.code}] ${appErr.message}`);
+        if (appErr.code === 'CANCELLED' || signal.aborted || req?.destroyed) {
+            taskLogger.info(`Download cancelled: [CANCELLED] Client cancelled or disconnected`);
+        } else {
+            taskLogger.error(`Queue execution error: [${appErr.code}] ${appErr.message}`);
+        }
         if (!res.headersSent) {
             sendError(res, appErr, req);
         } else if (!res.destroyed) res.destroy();
@@ -3673,7 +3755,11 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
         }
     } catch (error) {
         const appErr = classifyError(error, error?.stderr || '');
-        Logger.error(`Fetch info error: [${appErr.code}] ${appErr.message}`);
+        if (appErr.code === 'CANCELLED' || controller.signal.aborted) {
+            Logger.info(`Fetch info cancelled: [CANCELLED]`);
+        } else {
+            Logger.error(`Fetch info error: [${appErr.code}] ${appErr.message}`);
+        }
         if (!res.destroyed && !res.headersSent) sendError(res, appErr, req);
     }
 });
