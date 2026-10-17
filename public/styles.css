@@ -1291,6 +1291,14 @@ body[data-stage="working"] .media {
   transition: opacity 0.2s var(--spring-effects);
 }
 
+.format-tip {
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--md-sys-color-on-surface-variant);
+  opacity: 0.8;
+  line-height: 1.4;
+}
+
 /* bitrate quality slider */
 
 @property --slider-position {

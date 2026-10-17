@@ -57,8 +57,45 @@ function createApp() {
     app.disable('x-powered-by');
     app.set('trust proxy', TRUST_PROXY_HOPS);
 
-    // Attach request ID, logger, and response header to every request early
+function isPrivateOrLoopbackIp(ip) {
+    if (!ip || typeof ip !== 'string') return false;
+    let cleanIp = ip.trim();
+    if (cleanIp.startsWith('::ffff:')) {
+        cleanIp = cleanIp.slice(7);
+    }
+    if (cleanIp === '::1' || cleanIp === 'localhost') return true;
+
+    const parts = cleanIp.split('.').map(Number);
+    if (parts.length === 4 && parts.every(p => Number.isInteger(p) && p >= 0 && p <= 255)) {
+        if (parts[0] === 10) return true;
+        if (parts[0] === 127) return true;
+        if (parts[0] === 192 && parts[1] === 168) return true;
+        if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+    }
+    if (/^f[cd][0-9a-f]{2}:/i.test(cleanIp) || /^fe80:/i.test(cleanIp)) return true;
+    return false;
+}
+
+let warnedPrivateProxy = false;
+function checkProxySanity(req) {
+    if (warnedPrivateProxy) return;
+    if (!req.path || !req.path.startsWith('/api')) return;
+    const isUnset = process.env.TRUST_PROXY_HOPS === undefined || process.env.TRUST_PROXY_HOPS === '' || Number(process.env.TRUST_PROXY_HOPS) === 0;
+    if (isUnset) {
+        let clientIp = req.ip || req.socket?.remoteAddress || '';
+        if (clientIp.startsWith('::ffff:')) {
+            clientIp = clientIp.slice(7);
+        }
+        if (isPrivateOrLoopbackIp(clientIp)) {
+            warnedPrivateProxy = true;
+            Logger.warn('Detected client IP is in a private, loopback, or container network range on first API request. If running behind a reverse proxy, TRUST_PROXY_HOPS is probably wrong (set to 1 or higher so per-IP rate limiting works correctly).');
+        }
+    }
+}
+
+// Attach request ID, logger, and response header to every request early
     app.use((req, res, next) => {
+        checkProxySanity(req);
         const rawHeader = req.headers['x-request-id'];
         const validHeader = typeof rawHeader === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(rawHeader);
         req.id = validHeader ? rawHeader : randomUUID();
