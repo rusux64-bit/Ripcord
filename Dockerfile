@@ -23,6 +23,9 @@ RUN npm ci --omit=dev
 # copy the rest of the project files
 COPY . .
 
+# create cache directory owned by node user for volume mounts
+RUN mkdir -p /app/cache && chown -R node:node /app/cache
+
 # Run the network-facing service without root privileges.
 USER node
 

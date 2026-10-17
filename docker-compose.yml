@@ -23,8 +23,6 @@ services:
     tmpfs:
       # Temporary audio downloads, conversions, and cookie isolation copies
       - /tmp:size=1G,uid=1000,gid=1000,mode=1777
-      # Ephemeral Spotify match cache storage if volume is not mapped
-      - /app/cache:size=100M,uid=1000,gid=1000,mode=0755
 
     # Resource Constraints
     deploy:
@@ -37,7 +35,7 @@ services:
           memory: 256M
 
     ports:
-      - "${PORT:-5224}:5224"
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-5224}:5224"
 
     environment:
       NODE_ENV: production
@@ -54,11 +52,14 @@ services:
       # AGE_GATE_COOKIES: "off"
       # YTDLP_AGE_COOKIES_DIR: "/app/age_cookies"
 
-    # Optional Volume Mounts for Persistence & Cookies
-    # volumes:
-    #   # Persistent Spotify-to-YouTube match cache across restarts:
-    #   - ./cache:/app/cache
-    #   # Dedicated throwaway age-gate cookie accounts directory (read-only):
-    #   - ./age_cookies:/app/age_cookies:ro
-    #   # [Deprecated] Single fallback cookie file:
-    #   - ./cookies.txt:/app/cookies.txt:ro
+    # Volume Mounts for Persistence & Cookies
+    volumes:
+      # Persistent Spotify-to-YouTube match cache across restarts:
+      - cache:/app/cache
+      # Dedicated throwaway age-gate cookie accounts directory (read-only):
+      # - ./age_cookies:/app/age_cookies:ro
+      # [Deprecated] Single fallback cookie file:
+      # - ./cookies.txt:/app/cookies.txt:ro
+
+volumes:
+  cache:
