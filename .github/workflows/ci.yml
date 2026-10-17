@@ -35,6 +35,9 @@ jobs:
       - name: Verify JavaScript syntax
         run: npm run check:syntax
 
+      - name: Verify module imports
+        run: npm run check:imports
+
       - name: Run ESLint
         run: npm run lint
 

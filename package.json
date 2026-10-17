@@ -8,6 +8,7 @@
     "dev": "node --watch server.js",
     "lint": "eslint server.js src/ public/script.js",
     "check:syntax": "node --check server.js && node --check public/script.js && node -e \"require('fs').readdirSync('src').forEach(f => f.endsWith('.js') && require('child_process').execSync('node --check src/' + f))\"",
+    "check:imports": "node scripts/check-imports.js",
     "check:icons": "pipx run --spec \"fonttools[brotli,woff]\" python scripts/check-icons.py"
   },
   "keywords": [
