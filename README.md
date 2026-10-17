@@ -67,6 +67,11 @@ For age-restricted YouTube videos, Ripcord supports an isolated pool of throwawa
    - **Why `:rw`:** The pool writes refreshed session tokens back to host files after successful requests, preventing premature account expiration.
    - **Trade-off with `:ro`:** Mounting `:ro` prevents container modifications to host files, but refreshed tokens cannot be saved, so cookies expire sooner and require manual re-export.
 
+## Troubleshooting
+
+### Rollback an image
+To roll back a faulty deployment, pin the previous commit SHA tag in `docker-compose.yml` (e.g. `image: ghcr.io/rusux64-bit/ripcord:sha-<commit>`) and run `docker compose up -d`.
+
 ## License
 
 AGPL-3.0-or-later
