@@ -62,14 +62,14 @@ docker compose up -d
 
 ### Age-Gate Cookie Pool (Optional)
 
-YouTube restricts certain videos behind age verification. Ripcord provides an opt-in, secure multi-account cookie pool:
+YouTube restricts certain videos behind age verification. Ripcord provides an opt-in, secure multi-account cookie pool. Cookies are strictly scoped to **age-gate retries only** and are never attached to search, metadata queries, or normal first download attempts:
 
 1. Enable the pool in `.env`:
    ```bash
    AGE_GATE_COOKIES=on
    YTDLP_AGE_COOKIES_DIR=/path/to/age_cookies
    ```
-2. Create dedicated throwaway Google/YouTube accounts (never use your personal accounts).
+2. Create dedicated throwaway Google/YouTube accounts (never use personal accounts).
 3. In a fresh private/incognito window, log in and export the cookies in Netscape format.
 4. **Never reuse the browser session** after exporting to avoid triggering bot challenges or session termination.
 5. Save the exported cookie file into `YTDLP_AGE_COOKIES_DIR` with strict permissions:
@@ -77,7 +77,7 @@ YouTube restricts certain videos behind age verification. Ripcord provides an op
    chmod 700 /path/to/age_cookies
    chmod 600 /path/to/age_cookies/*.txt
    ```
-6. The server automatically validates Netscape headers, enforces a domain whitelist (`.youtube.com`, `.google.com`), isolates execution to private `0600` copies in `WORK_DIR`, bounds concurrency to 1 per account, and applies backoff cooldowns on bot or login checks.
+6. The server automatically validates Netscape headers, enforces a domain whitelist (`.youtube.com`, `.google.com`), isolates execution to private `0600` copies in `WORK_DIR`, bounds concurrency to 1 per account, and applies backoff cooldowns on bot or login checks. Authenticated retries use the configurable client list `YTDLP_AUTHED_CLIENTS` (defaults to `web_embedded,web`).
 
 ---
 
@@ -85,7 +85,7 @@ YouTube restricts certain videos behind age verification. Ripcord provides an op
 
 - **Source Fidelity**: YouTube audio streams are lossy (typically 128-160 kbps Opus/AAC). Selecting FLAC or WAV provides an uncompressed container, but cannot restore frequencies absent from the source stream.
 - **Spotify Accuracy**: Audio matching compares search-result titles, artist/channel metadata, and duration. Alternate edits can still pass when their metadata closely matches, and low-confidence results are skipped.
-- **Bot Detection**: When hosting on cloud VPS providers, provide a Netscape-formatted `cookies.txt` or set `YTDLP_COOKIES_PATH` in `.env` if YouTube challenges requests.
+- **Cookie Security**: Cookies are never used for initial downloads, candidate searches, or playlist discovery. They are acquired on-demand through pool leases exclusively when an initial stream attempt encounters an age restriction.
 - **Fair Use**: Intended solely for personal archiving and educational purposes.
 
 ---

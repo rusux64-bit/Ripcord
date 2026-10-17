@@ -576,9 +576,10 @@ const cleanupStaleWorkFiles = () => sweepWorkDir(true);
 cleanupStaleWorkFiles();
 
 const downloadMetaMap = new Map();
+const YTDLP_AUTHED_CLIENTS = (process.env.YTDLP_AUTHED_CLIENTS || 'web_embedded,web').trim();
 
 if (COOKIES_PATH) {
-    Logger.warn(`Global yt-dlp cookies configured (${COOKIES_PATH}). Global cookies slow M4A/OGG fast paths by forcing authed player clients and JS challenge solving.`);
+    Logger.warn(`DEPRECATION WARNING: YTDLP_COOKIES_PATH (${COOKIES_PATH}) is deprecated and will be removed in a future release. Use AGE_GATE_COOKIES=on with YTDLP_AGE_COOKIES_DIR instead. Cookies are now scoped strictly to age-gate retries.`);
 }
 
 const AGE_GATE_COOKIES_ENABLED = ['1', 'true', 'on', 'yes'].includes(String(process.env.AGE_GATE_COOKIES || 'off').toLowerCase().trim());
@@ -2063,12 +2064,10 @@ async function searchYouTubeCandidates(query, maxCandidates, signal, logger = Lo
     const args = [
         '--ignore-config',
         '--dump-single-json', '--flat-playlist', '--skip-download', '--no-warnings',
-        '--extractor-args', 'youtube:player_client=android,web'
+        '--extractor-args', 'youtube:player_client=android,web',
+        '--',
+        searchTarget
     ];
-    if (COOKIES_PATH) {
-        args.push('--cookies', COOKIES_PATH);
-    }
-    args.push('--', searchTarget);
 
     return new Promise((resolve, reject) => {
         if (signal?.aborted) {
@@ -2510,7 +2509,7 @@ async function getYoutubeInfo(url, signal) {
 }
 
 // list all songs in a youtube playlist without downloading them yet
-async function getYoutubePlaylistData(url, signal, cookiePathOverride = null) {
+async function getYoutubePlaylistData(url, signal) {
     return new Promise((resolve, reject) => {
         const ytdlpArgs = [
             '--ignore-config',
@@ -2520,16 +2519,10 @@ async function getYoutubePlaylistData(url, signal, cookiePathOverride = null) {
             '--no-abort-on-error',
             '--no-warnings',
             '--playlist-end', String(MAX_PLAYLIST_TRACKS),
-            '--extractor-args', 'youtube:player_client=android,web'
+            '--extractor-args', 'youtube:player_client=android,web',
+            '--',
+            url
         ];
-
-        if (cookiePathOverride) {
-            ytdlpArgs.push('--cookies', cookiePathOverride);
-        } else if (COOKIES_PATH) {
-            ytdlpArgs.push('--cookies', COOKIES_PATH);
-        }
-
-        ytdlpArgs.push('--', url);
 
         const ytdlp = spawn('yt-dlp', ytdlpArgs);
         let output = '';
@@ -2796,10 +2789,11 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal, targetForma
 
             let chosenClient = 'visionos,android,web';
             if (cookiePathOverride) {
-                chosenClient = 'web_embedded,web';
+                chosenClient = YTDLP_AUTHED_CLIENTS;
                 ytdlpArgs.push('--cookies', cookiePathOverride);
                 ytdlpArgs.push('--js-runtimes', 'node');
                 ytdlpArgs.push('--extractor-args', `youtube:player_client=${chosenClient}`);
+                logger.info(`Age-gate cookie retry using authed player client(s) [${chosenClient}]`);
             } else {
                 ytdlpArgs.push('--extractor-args', `youtube:player_client=${chosenClient}`);
             }
@@ -3476,23 +3470,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
         let collectionData = null;
         if (isYouTubePlaylist(url)) {
             taskLogger.info('Fetching YouTube playlist items');
-            try {
-                collectionData = await getYoutubePlaylistData(url, signal);
-            } catch (err) {
-                if (err?.code === 'AGE_RESTRICTED' && ageGateCookiePool.isEnabled()) {
-                    const lease = await ageGateCookiePool.acquire();
-                    if (!lease) throw err;
-                    try {
-                        collectionData = await getYoutubePlaylistData(url, signal, lease.cookiePath);
-                        lease.release(true);
-                    } catch (cookieErr) {
-                        lease.release(false, cookieErr);
-                        throw cookieErr;
-                    }
-                } else {
-                    throw err;
-                }
-            }
+            collectionData = await getYoutubePlaylistData(url, signal);
         } else if (spotifyLink && spotifyLink.type !== 'track') {
             taskLogger.info('Fetching Spotify collection items');
             collectionData = await getSpotifyData(url, signal);
@@ -3687,28 +3665,7 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
             try {
                 release = await metadataAcquisition;
                 if (controller.signal.aborted) return;
-                let ytData;
-                try {
-                    ytData = await getYoutubePlaylistData(url, controller.signal);
-                } catch (err) {
-                    const appErr = classifyError(err, err?.stderr || '');
-                    if (appErr.code === 'AGE_RESTRICTED' && ageGateCookiePool.isEnabled()) {
-                        const lease = await ageGateCookiePool.acquire();
-                        if (lease) {
-                            try {
-                                ytData = await getYoutubePlaylistData(url, controller.signal, lease.cookiePath);
-                                lease.release(true);
-                            } catch (cookieErr) {
-                                lease.release(false, cookieErr);
-                                throw cookieErr;
-                            }
-                        } else {
-                            throw appErr;
-                        }
-                    } else {
-                        throw err;
-                    }
-                }
+                const ytData = await getYoutubePlaylistData(url, controller.signal);
                 return res.json({
                     type: 'collection',
                     title: ytData.name,
