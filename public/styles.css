@@ -1656,57 +1656,11 @@ body[data-stage="working"] .media {
   font-size: 0.75rem;
 }
 
-.error-banner__details {
-  border-top: 1px solid color-mix(in srgb, var(--md-sys-color-on-error-container) 15%, transparent);
-  padding-top: 6px;
-  font-size: 0.75rem;
-}
-
-.error-banner__details summary {
-  cursor: pointer;
-  font-weight: 600;
-  color: var(--md-sys-color-on-error-container);
-  opacity: 0.85;
-  user-select: none;
-}
-
-.error-banner__details summary:focus-visible {
-  outline: 2px solid var(--md-sys-color-primary);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
-
-.error-banner__meta {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-.error-banner__row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.error-banner__meta code {
-  background: color-mix(in srgb, var(--md-sys-color-on-error-container) 12%, transparent);
-  padding: 2px 6px;
-  border-radius: 6px;
-  font-family: var(--mono);
-  font-size: 0.75rem;
-  word-break: break-all;
-}
-
-.error-banner__copy {
-  align-self: flex-start;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  --h: 28px;
-  padding: 0 10px;
-  font-size: 0.6875rem;
-  margin-top: 4px;
+.error-banner__ref {
+  display: block;
+  font: 400 0.6875rem/1.2 var(--mono, monospace);
+  color: color-mix(in srgb, var(--md-sys-color-on-error-container) 65%, transparent);
+  user-select: all;
 }
 
 /* done screen skipped tracks list */

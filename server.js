@@ -1083,7 +1083,6 @@ function createRateLimiter(limit, message) {
 
 app.use('/api', (req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Request-Id, X-Ripcord-Note');
     next();
 });
 // per-track progress for collection downloads, keyed by a client-generated job id

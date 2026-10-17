@@ -16,3 +16,4 @@ logs
 *.log
 /tmp
 scratch
+/cookies

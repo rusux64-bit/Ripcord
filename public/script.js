@@ -8,43 +8,13 @@ const root = document.documentElement;
 const body = document.body;
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 
-// in-memory client diagnostics ring buffer (max 100 entries)
-const clientLogs = [];
-
-function sanitizeForLogs(val) {
-    if (typeof val === 'string') {
-        return val.replace(/https?:\/\/[^\s"'<>)\]]+/g, '[URL]');
+// client logger: console-only in development, no-op in production
+const isDev = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname) || location.protocol === 'file:';
+function logClientEvent(type, msg, detail = null) {
+    if (isDev) {
+        console.log(`[ripcord:${type}] ${msg}`, detail || '');
     }
-    if (val && typeof val === 'object') {
-        if (Array.isArray(val)) return val.map(sanitizeForLogs);
-        const out = {};
-        for (const [k, v] of Object.entries(val)) {
-            const kl = k.toLowerCase();
-            if (kl.includes('url') || kl.includes('auth') || kl.includes('token') || kl.includes('cookie') || kl.includes('secret')) {
-                out[k] = '[REDACTED]';
-            } else {
-                out[k] = sanitizeForLogs(v);
-            }
-        }
-        return out;
-    }
-    return val;
 }
-
-function logClientEvent(type, msg, detail = {}) {
-    const entry = {
-        ts: new Date().toISOString(),
-        type,
-        msg: sanitizeForLogs(msg)
-    };
-    const cleanDetail = sanitizeForLogs(detail);
-    if (cleanDetail && typeof cleanDetail === 'object' && Object.keys(cleanDetail).length > 0) {
-        entry.detail = cleanDetail;
-    }
-    clientLogs.push(entry);
-    if (clientLogs.length > 100) clientLogs.shift();
-}
-window.__ripcord_logs = clientLogs;
 
 window.addEventListener('error', (event) => {
     logClientEvent('error', event.message || 'Window error', {
@@ -114,20 +84,12 @@ const el = {
     greeting: $('#greeting'),
     inputError: $('#input-error'),
     inputErrorMsg: $('#input-error-msg'),
-    inputErrorActions: $('#input-error-actions'),
-    inputErrorDetails: $('#input-error-details'),
-    inputErrorCode: $('#input-error-code'),
-    inputErrorRefRow: $('#input-error-ref-row'),
     inputErrorRef: $('#input-error-ref'),
-    inputErrorCopy: $('#input-error-copy'),
+    inputErrorActions: $('#input-error-actions'),
     optionsError: $('#options-error'),
     optionsErrorMsg: $('#options-error-msg'),
-    optionsErrorActions: $('#options-error-actions'),
-    optionsErrorDetails: $('#options-error-details'),
-    optionsErrorCode: $('#options-error-code'),
-    optionsErrorRefRow: $('#options-error-ref-row'),
     optionsErrorRef: $('#options-error-ref'),
-    optionsErrorCopy: $('#options-error-copy'),
+    optionsErrorActions: $('#options-error-actions'),
     doneSkipped: $('#done-skipped'),
     doneSkippedToggle: $('#done-skipped-toggle'),
     doneSkippedToggleText: $('#done-skipped-toggle-text'),
@@ -735,50 +697,6 @@ el.snackbarClose.addEventListener('click', () => el.snackbar.classList.remove('s
 
 // client error handling and diagnostics subsystem
 
-function legacyCopy(text) {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.style.position = 'fixed';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    try {
-        document.execCommand('copy');
-    } catch { /* ignore */ }
-    document.body.removeChild(ta);
-}
-
-function copyDiagnostics(err) {
-    const diagnostics = {
-        code: err?.code || 'UNKNOWN',
-        requestId: err?.requestId || 'none',
-        timestamp: new Date().toISOString(),
-        appVersion: '1.0.0',
-        browser: navigator.userAgent || 'unknown',
-        logs: clientLogs.map(l => ({
-            ts: l.ts,
-            type: l.type,
-            msg: sanitizeForLogs(l.msg),
-            ...(l.detail ? { detail: sanitizeForLogs(l.detail) } : {})
-        }))
-    };
-    const jsonStr = JSON.stringify(diagnostics, null, 2);
-    const finalize = () => {
-        logClientEvent('action', 'Diagnostics copied to clipboard');
-        toast('Diagnostics copied to clipboard.', 2500);
-    };
-    if (navigator.clipboard?.writeText) {
-        navigator.clipboard.writeText(jsonStr).then(finalize).catch(() => {
-            legacyCopy(jsonStr);
-            finalize();
-        });
-    } else {
-        legacyCopy(jsonStr);
-        finalize();
-    }
-}
-
 const ERROR_MESSAGES = {
     INVALID_URL: {
         message: 'Please enter a valid Spotify or YouTube link.',
@@ -922,26 +840,19 @@ function showErrorBanner(prefix, err, onRetry) {
 
     const banner = el[`${prefix}Error`];
     const msg = el[`${prefix}ErrorMsg`];
-    const actions = el[`${prefix}ErrorActions`];
-    const details = el[`${prefix}ErrorDetails`];
-    const code = el[`${prefix}ErrorCode`];
-    const refRow = el[`${prefix}ErrorRefRow`];
     const ref = el[`${prefix}ErrorRef`];
-    const copy = el[`${prefix}ErrorCopy`];
+    const actions = el[`${prefix}ErrorActions`];
 
     if (!banner) return;
 
     msg.textContent = err.message || 'An error occurred.';
-    code.textContent = err.code || 'UNKNOWN';
     if (err.requestId) {
-        ref.textContent = err.requestId;
-        refRow.hidden = false;
+        ref.textContent = `Ref: ${String(err.requestId).slice(0, 8)}`;
+        ref.hidden = false;
     } else {
-        refRow.hidden = true;
+        ref.textContent = '';
+        ref.hidden = true;
     }
-    details.open = false;
-
-    copy.onclick = () => copyDiagnostics(err);
 
     actions.replaceChildren();
 
@@ -1998,9 +1909,11 @@ setupSpin();
 syncThemeColorMeta();
 initColourEngine();
 
-window.resolveDownloadName = resolveDownloadName;
-window.state = state;
-window.finish = finish;
+if (isDev) {
+    window.resolveDownloadName = resolveDownloadName;
+    window.state = state;
+    window.finish = finish;
+}
 
 setTimeout(() => {
     delete root.dataset.intro;
