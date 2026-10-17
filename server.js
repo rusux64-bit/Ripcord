@@ -265,11 +265,9 @@ const ERROR_DEFINITIONS = {
     },
     AGE_RESTRICTED: {
         httpStatus: 403,
-        userMessage: 'This video is age-restricted and requires age confirmation.',
+        userMessage: "This video is age-restricted and can't be downloaded on this server.",
         retryable: false,
-        get action() {
-            return (typeof ageGateCookiePool !== 'undefined' && ageGateCookiePool.isEnabled()) ? 'age_confirm' : null;
-        }
+        action: null
     },
     LOGIN_REQUIRED: {
         httpStatus: 403,
@@ -2056,10 +2054,14 @@ async function searchYouTubeCandidates(query, maxCandidates, signal, logger = Lo
     const searchTarget = `ytsearch${maxCandidates}:${query}`;
     const args = [
         '--ignore-config',
-        '--dump-single-json', '--flat-playlist', '--skip-download', '--no-warnings',
-        '--extractor-args', 'youtube:player_client=android,web'
+        '--js-runtimes', 'node',
+        '--dump-single-json', '--flat-playlist', '--skip-download', '--no-warnings'
     ];
-    if (COOKIES_PATH) args.push('--cookies', COOKIES_PATH);
+    if (COOKIES_PATH) {
+        args.push('--cookies', COOKIES_PATH);
+    } else {
+        args.push('--extractor-args', 'youtube:player_client=android,web');
+    }
     args.push('--', searchTarget);
 
     return new Promise((resolve, reject) => {
@@ -2223,8 +2225,7 @@ async function downloadSpotifyAudioWithFallback({
     onProgress,
     logger = Logger,
     jobExcludedVideoIds = new Set(),
-    onNote = null,
-    ageConfirmed = false
+    onNote = null
 }) {
     const candidates = await findSpotifyCandidates(track, signal, logger, jobExcludedVideoIds);
     if (!candidates || candidates.length === 0) {
@@ -2276,7 +2277,7 @@ async function downloadSpotifyAudioWithFallback({
         }
     }
 
-    if (ageConfirmed && ageGateCookiePool.isEnabled() && lastError?.code === 'AGE_RESTRICTED') {
+    if (ageGateCookiePool.isEnabled() && lastError?.code === 'AGE_RESTRICTED') {
         const topCandidate = candidates[0];
         logger.info(`Spotify age-gate fallback: all non-cookie attempts failed; retrying top candidate [${topCandidate.videoId}] with age-gate cookie account`);
         const lease = await ageGateCookiePool.acquire();
@@ -2490,6 +2491,7 @@ async function getYoutubePlaylistData(url, signal, cookiePathOverride = null) {
     return new Promise((resolve, reject) => {
         const ytdlpArgs = [
             '--ignore-config',
+            '--js-runtimes', 'node',
             '--flat-playlist',
             '--print', '%(playlist_title)s:::%(id)s:::%(title)s:::%(uploader)s',
             '--ignore-errors',
@@ -2759,21 +2761,22 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal, targetForma
                 : targetFormat === 'm4a' ? 'bestaudio[acodec=aac]/bestaudio/best' : 'bestaudio/best';
             const ytdlpArgs = [
                 '--ignore-config',
+                '--js-runtimes', 'node',
                 '-f', formatSelector,
                 '--no-playlist',
                 '--no-warnings',
                 '--max-filesize', `${Math.floor(MAX_DOWNLOAD_BYTES / (1024 * 1024))}M`,
-                '--concurrent-fragments', String(YTDLP_CONCURRENT_FRAGMENTS),
-                '--extractor-args', 'youtube:player_client=android,web'
+                '--concurrent-fragments', String(YTDLP_CONCURRENT_FRAGMENTS)
             ];
 
-            if (YTDLP_USE_ARIA2C && aria2cAvailable) ytdlpArgs.push('--downloader', 'aria2c');
-
-            if (cookiePathOverride) {
-                ytdlpArgs.push('--cookies', cookiePathOverride);
-            } else if (COOKIES_PATH) {
-                ytdlpArgs.push('--cookies', COOKIES_PATH);
+            const activeCookiePath = cookiePathOverride || COOKIES_PATH;
+            if (activeCookiePath) {
+                ytdlpArgs.push('--cookies', activeCookiePath);
+            } else {
+                ytdlpArgs.push('--extractor-args', 'youtube:player_client=android,web');
             }
+
+            if (YTDLP_USE_ARIA2C && aria2cAvailable) ytdlpArgs.push('--downloader', 'aria2c');
 
             if (onProgress) {
                 ytdlpArgs.push('--newline', '--progress', '--progress-template',
@@ -3025,7 +3028,7 @@ async function injectVorbisCoverArt(filePath, imgPath, format, logger = Logger) 
 }
 
 // transcode the audio with ffmpeg and stream it directly to the user
-async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res, filename = '', artist = '', signal, req = null, logger = Logger, isTempFile = false, ageConfirmed = false) {
+async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res, filename = '', artist = '', signal, req = null, logger = Logger, isTempFile = false) {
     const tempFiles = [];
 
     // clean up temp files if the user closes their browser or cancels
@@ -3043,13 +3046,11 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
                 tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format, undefined, logger);
                 tempFiles.push(tempAudioPath);
             } catch (err) {
-                if (err?.code === 'AGE_RESTRICTED' && ageConfirmed && ageGateCookiePool.isEnabled()) {
-                    logger.info('Age confirmation provided, acquiring age-gate cookie account');
+                if (err?.code === 'AGE_RESTRICTED' && ageGateCookiePool.isEnabled()) {
+                    logger.info('Track is age-restricted, acquiring age-gate cookie account for automatic retry');
                     const lease = await ageGateCookiePool.acquire();
                     if (!lease) {
-                        throw new AppError('AGE_RESTRICTED', {
-                            userMessage: 'Age-restricted download accounts are currently busy or cooling down. Please try again later.'
-                        });
+                        throw new AppError('AGE_RESTRICTED');
                     }
                     try {
                         tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format, undefined, logger, lease.cookiePath);
@@ -3140,7 +3141,7 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
     }
 }
 
-async function downloadPlaylistTrack(track, index, audioFormat, signal, report = () => { }, logger = Logger, jobExcludedVideoIds = new Set(), ageConfirmed = false) {
+async function downloadPlaylistTrack(track, index, audioFormat, signal, report = () => { }, logger = Logger, jobExcludedVideoIds = new Set()) {
     const trackLogger = logger.child({ trackIndex: index });
     const tempFiles = [];
 
@@ -3208,8 +3209,8 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal, report =
                     }
                 }
             } catch (err) {
-                if (err?.code === 'AGE_RESTRICTED' && ageConfirmed && ageGateCookiePool.isEnabled()) {
-                    trackLogger.info('Track is age-restricted and age is confirmed, acquiring age-gate cookie account');
+                if (err?.code === 'AGE_RESTRICTED' && ageGateCookiePool.isEnabled()) {
+                    trackLogger.info('Track is age-restricted, acquiring age-gate cookie account for automatic retry');
                     const lease = await ageGateCookiePool.acquire();
                     if (!lease) throw err;
                     try {
@@ -3237,8 +3238,7 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal, report =
                 onNote: n => {
                     note = n;
                     report(index, { note: n });
-                },
-                ageConfirmed
+                }
             });
             const [downloadResult, spCover] = await Promise.all([downloadPromise, spotifyCoverPromise]);
             tempAudioPath = downloadResult.tempAudioPath;
@@ -3346,7 +3346,6 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
     const jobStartTime = Date.now();
     let job = null;
     const jobExcludedVideoIds = new Set();
-    const ageConfirmed = req?.query?.ageConfirmed === '1';
 
     try {
         taskLogger.info(`Task started (${audioFormat.toUpperCase()})`);
@@ -3370,7 +3369,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             res.setHeader('Content-Type', mimeType);
             const info = await getYoutubeInfo(url, signal);
             const trackTitle = customTitle || info.title;
-            await processAndStreamAudio(url, audioBitrate, audioFormat, info.thumbnail, res, trackTitle, info.author, signal, req, taskLogger, false, ageConfirmed);
+            await processAndStreamAudio(url, audioBitrate, audioFormat, info.thumbnail, res, trackTitle, info.author, signal, req, taskLogger, false);
             return;
         }
 
@@ -3390,10 +3389,9 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                 jobExcludedVideoIds,
                 onNote: (note) => {
                     res.setHeader('X-Ripcord-Note', note);
-                },
-                ageConfirmed
+                }
             });
-            await processAndStreamAudio(downloaded.tempAudioPath, audioBitrate, audioFormat, track.thumbnail, res, trackTitle, track.artist, signal, req, taskLogger, true, ageConfirmed);
+            await processAndStreamAudio(downloaded.tempAudioPath, audioBitrate, audioFormat, track.thumbnail, res, trackTitle, track.artist, signal, req, taskLogger, true);
             return;
         }
 
@@ -3404,7 +3402,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             try {
                 collectionData = await getYoutubePlaylistData(url, signal);
             } catch (err) {
-                if (err?.code === 'AGE_RESTRICTED' && ageConfirmed && ageGateCookiePool.isEnabled()) {
+                if (err?.code === 'AGE_RESTRICTED' && ageGateCookiePool.isEnabled()) {
                     const lease = await ageGateCookiePool.acquire();
                     if (!lease) throw err;
                     try {
@@ -3477,7 +3475,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                     while (!signal.aborted) {
                         const index = nextTrack++;
                         if (index >= tracks.length) return;
-                        const downloaded = await downloadPlaylistTrack(tracks[index], index, audioFormat, signal, report, taskLogger, jobExcludedVideoIds, ageConfirmed);
+                        const downloaded = await downloadPlaylistTrack(tracks[index], index, audioFormat, signal, report, taskLogger, jobExcludedVideoIds);
                         if (!downloaded) continue;
                         try {
                             await handoffQueue.push(downloaded);
@@ -3578,7 +3576,6 @@ app.get('/api/health', (req, res) => {
 app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
     try {
         const rawUrl = req.query.url;
-        const ageConfirmed = req.query.ageConfirmed === '1';
         if (!isSafeUrl(rawUrl)) {
             return sendError(res, new AppError('INVALID_URL', { userMessage: 'Please enter a valid Spotify or YouTube URL.' }), req);
         }
@@ -3614,7 +3611,7 @@ app.get('/api/fetch-info', rejectCrossSiteRequests, async (req, res) => {
                     ytData = await getYoutubePlaylistData(url, controller.signal);
                 } catch (err) {
                     const appErr = classifyError(err, err?.stderr || '');
-                    if (appErr.code === 'AGE_RESTRICTED' && ageConfirmed && ageGateCookiePool.isEnabled()) {
+                    if (appErr.code === 'AGE_RESTRICTED' && ageGateCookiePool.isEnabled()) {
                         const lease = await ageGateCookiePool.acquire();
                         if (lease) {
                             try {

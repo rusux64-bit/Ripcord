@@ -812,8 +812,8 @@ const ERROR_MESSAGES = {
         defaultRetrySeconds: 10
     },
     AGE_RESTRICTED: {
-        message: 'This video requires age confirmation.',
-        action: 'age_confirm'
+        message: "This video is age-restricted and can't be downloaded on this server.",
+        action: 'try_another'
     },
     LOGIN_REQUIRED: {
         message: 'YouTube requires a login or bot verification to access this audio.',
@@ -915,7 +915,7 @@ function normalizeError(data, httpStatus, requestId) {
     return err;
 }
 
-function showErrorBanner(prefix, err, onRetry, onAgeConfirm) {
+function showErrorBanner(prefix, err, onRetry) {
     state.currentError = err;
     clearInterval(state.countdownTimer);
     state.countdownTimer = null;
@@ -976,24 +976,6 @@ function showErrorBanner(prefix, err, onRetry, onAgeConfirm) {
             onRetry?.();
         });
         actions.append(retryBtn);
-
-        const tryAnotherBtn = document.createElement('button');
-        tryAnotherBtn.type = 'button';
-        tryAnotherBtn.className = 'btn btn--tonal btn--sm';
-        tryAnotherBtn.textContent = 'Try another link';
-        tryAnotherBtn.addEventListener('click', resetToInput);
-        actions.append(tryAnotherBtn);
-
-    } else if (err.action === 'age_confirm') {
-        const ageBtn = document.createElement('button');
-        ageBtn.type = 'button';
-        ageBtn.className = 'btn btn--filled btn--sm';
-        ageBtn.textContent = "I'm 18 or older, continue";
-        ageBtn.addEventListener('click', () => {
-            clearErrorBanner(prefix);
-            onAgeConfirm?.();
-        });
-        actions.append(ageBtn);
 
         const tryAnotherBtn = document.createElement('button');
         tryAnotherBtn.type = 'button';
@@ -1185,7 +1167,7 @@ let fetchController = null;
 let fetchRequestId = 0;
 let fetching = false;
 
-async function submitUrl(ageConfirmed = false) {
+async function submitUrl() {
     if (fetching) return;
     const rawVal = el.url.value;
     const playlistCtx = detectYouTubePlaylistContext(rawVal);
@@ -1195,7 +1177,7 @@ async function submitUrl(ageConfirmed = false) {
             ? 'That does not look like a Spotify or YouTube link.'
             : 'Paste a link first.';
         setFieldError(msg);
-        showErrorBanner('input', normalizeError({ code: 'INVALID_URL', error: msg }, 400), () => submitUrl(false), () => submitUrl(true));
+        showErrorBanner('input', normalizeError({ code: 'INVALID_URL', error: msg }, 400), () => submitUrl());
         el.url.focus();
         return;
     }
@@ -1213,10 +1195,9 @@ async function submitUrl(ageConfirmed = false) {
     clearErrorBanner('input');
     fetching = true;
     setFetching(true);
-    logClientEvent('api', 'Fetching metadata', { ageConfirmed });
+    logClientEvent('api', 'Fetching metadata');
     try {
         const params = new URLSearchParams({ url });
-        if (ageConfirmed) params.set('ageConfirmed', '1');
         const res = await fetch(`/api/fetch-info?${params.toString()}`, {
             signal: fetchController.signal
         });
@@ -1237,7 +1218,7 @@ async function submitUrl(ageConfirmed = false) {
             code: err.code,
             requestId: err.requestId
         });
-        showErrorBanner('input', err, () => submitUrl(false), () => submitUrl(true));
+        showErrorBanner('input', err, () => submitUrl());
     } finally {
         if (fetchId === fetchRequestId) {
             fetching = false;
@@ -1547,7 +1528,7 @@ el.backBtn.addEventListener('click', () => {
 
 // handle starting the download
 
-function startDownload(ageConfirmed = false) {
+function startDownload() {
     clearErrorBanner('options');
     const info = state.info;
     const isCollection = info.type === 'collection';
@@ -1556,7 +1537,6 @@ function startDownload(ageConfirmed = false) {
     const name = safeName(el.filename.value) || suggestedName() || 'ripcord';
 
     const params = new URLSearchParams({ url: state.url, bitrate: String(bitrate), format: fmt, filename: name });
-    if (ageConfirmed) params.set('ageConfirmed', '1');
     if (!isCollection && nameTouched) {
         const customTitle = el.filename.value.trim().slice(0, 120);
         if (customTitle) params.set('title', customTitle);
@@ -1564,7 +1544,7 @@ function startDownload(ageConfirmed = false) {
     const saveName = isCollection ? `${safeName(info.title) || 'ripcord'}.zip` : `${name}.${fmt}`;
     state.blobName = saveName;
 
-    logClientEvent('action', 'Initiated download', { format: fmt, bitrate, isCollection, ageConfirmed });
+    logClientEvent('action', 'Initiated download', { format: fmt, bitrate, isCollection });
 
     el.workingTitle.textContent = isCollection ? 'Packing up your collection' : 'Pulling the sound out';
     el.metaLeft.textContent = 'Getting started';
@@ -1887,7 +1867,7 @@ function fail(err) {
         requestId: err.requestId
     });
     go('options', 'back');
-    showErrorBanner('options', err, () => startDownload(false), () => startDownload(true));
+    showErrorBanner('options', err, () => startDownload());
 }
 
 function updateSkippedToggleLabel(failedCount, isExpanded) {
