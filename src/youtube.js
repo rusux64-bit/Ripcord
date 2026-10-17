@@ -17,14 +17,13 @@ const {
     aria2cAvailable,
     COOKIES_PATH
 } = require('./config');
-const { Logger, startStage, safeMetadataText } = require('./logger');
+const { Logger, startStage, safeMetadataText, sanitizeAsciiHeader } = require('./logger');
 const { AppError, classifyError } = require('./errors');
 const { ytdlpSemaphore } = require('./queue');
 const { ageGateCookiePool } = require('./cookies');
 const {
     downloadMetaMap,
     sanitizeFilename,
-    sanitizeAsciiHeader,
     cleanupFiles,
     parseCoverUrl,
     cropToSquareJpeg,
