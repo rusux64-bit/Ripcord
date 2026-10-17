@@ -8,7 +8,8 @@ const {
     AGE_GATE_COOKIES_ENABLED,
     YTDLP_AGE_COOKIES_DIR,
     COOKIE_BUDGET_CACHE_FILE,
-    COOKIE_GUARD_SECRET_FILE
+    COOKIE_GUARD_SECRET_FILE,
+    COOKIE_GUARD_SOURCE_CACHE_MAX_BYTES
 } = require('./config');
 const { Logger } = require('./logger');
 
@@ -276,7 +277,7 @@ class CookieGuard {
         jitterMinMs = 20000,
         jitterMaxMs = 40000,
         sourceCacheTtlMs = 15 * 60 * 1000,
-        sourceCacheMaxBytes = 500 * 1024 * 1024,
+        sourceCacheMaxBytes = COOKIE_GUARD_SOURCE_CACHE_MAX_BYTES,
         failedCookieTtlMs = 60 * 60 * 1000
     } = {}) {
         this.pool = pool;
@@ -302,7 +303,10 @@ class CookieGuard {
         this.failedCookieTtlMs = failedCookieTtlMs;
 
         this.sourceCacheDir = path.join(this.workDir, 'source_cache');
-        try { fs.mkdirSync(this.sourceCacheDir, { recursive: true }); } catch {}
+        try {
+            fs.mkdirSync(this.sourceCacheDir, { recursive: true });
+            this.cleanSourceCacheOnStartup();
+        } catch {}
 
         this.queue = []; // FIFO queue of waiting requests: [{ id, ip, subnet, videoId, kind, signal, resolve, reject, enqueuedAt, timer }]
         this.inFlightDownloads = new Map(); // videoId -> Promise<{ success, tempAudioPath, error }>
@@ -1020,6 +1024,29 @@ class CookieGuard {
                 if (fs.existsSync(entry.filePath)) fs.unlinkSync(entry.filePath);
             } catch {}
             this.sourceAudioCache.delete(videoId);
+        }
+    }
+
+    cleanSourceCacheOnStartup() {
+        try {
+            if (!fs.existsSync(this.sourceCacheDir)) return;
+            const files = fs.readdirSync(this.sourceCacheDir);
+            let cleanedCount = 0;
+            for (const file of files) {
+                try {
+                    const fullPath = path.join(this.sourceCacheDir, file);
+                    const stat = fs.statSync(fullPath);
+                    if (stat.isFile()) {
+                        fs.unlinkSync(fullPath);
+                        cleanedCount++;
+                    }
+                } catch {}
+            }
+            if (cleanedCount > 0) {
+                this.logger.info(`[cookie_guard] Cleaned ${cleanedCount} leftover source_cache file(s) on startup`);
+            }
+        } catch (err) {
+            this.logger.warn(`[cookie_guard] Failed to clean source_cache on startup: ${err.message}`);
         }
     }
 
