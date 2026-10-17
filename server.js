@@ -518,6 +518,11 @@ const RATE_LIMIT_WINDOW_MS = positiveIntegerEnv('RATE_LIMIT_WINDOW_MS', 15 * 60 
 const API_RATE_LIMIT_MAX = positiveIntegerEnv('RATE_LIMIT_MAX', 120, 10000);
 const DOWNLOAD_CONCURRENCY = positiveIntegerEnv('DOWNLOAD_CONCURRENCY', 4, 8);
 const METADATA_CONCURRENCY = positiveIntegerEnv('METADATA_CONCURRENCY', DOWNLOAD_CONCURRENCY, 8);
+const SPOTIFY_SEARCH_CONCURRENCY = positiveIntegerEnv('SPOTIFY_SEARCH_CONCURRENCY', 6, 16);
+const SPOTIFY_MATCH_CACHE_FILE = process.env.SPOTIFY_MATCH_CACHE_FILE || path.join(__dirname, 'cache', 'spotify_matches.json');
+const SPOTIFY_MATCH_CACHE_MAX_SIZE = positiveIntegerEnv('SPOTIFY_MATCH_CACHE_MAX_SIZE', 10000, 100000);
+const SPOTIFY_MATCH_CACHE_TTL_DAYS = positiveIntegerEnv('SPOTIFY_MATCH_CACHE_TTL_DAYS', 30, 365);
+const SPOTIFY_MATCH_CACHE_TTL_MS = SPOTIFY_MATCH_CACHE_TTL_DAYS * 24 * 60 * 60 * 1000;
 const MAX_QUEUED_DOWNLOADS = positiveIntegerEnv('MAX_QUEUED_DOWNLOADS', 8, 100);
 const MAX_PLAYLIST_TRACKS = positiveIntegerEnv('MAX_PLAYLIST_TRACKS', 30, 100);
 const MAX_PLAYLIST_OUTPUT_BYTES = positiveIntegerEnv('MAX_PLAYLIST_OUTPUT_BYTES', 2 * 1024 * 1024, 16 * 1024 * 1024);
@@ -2171,6 +2176,164 @@ class AgeGateLruCache {
 
 const ageRestrictedCache = new AgeGateLruCache(1000, 24 * 60 * 60 * 1000);
 
+class SpotifyMatchCache {
+    constructor({
+        filePath = SPOTIFY_MATCH_CACHE_FILE,
+        maxSize = SPOTIFY_MATCH_CACHE_MAX_SIZE,
+        ttlMs = SPOTIFY_MATCH_CACHE_TTL_MS,
+        logger = Logger
+    } = {}) {
+        this.filePath = filePath;
+        this.maxSize = maxSize;
+        this.ttlMs = ttlMs;
+        this.logger = logger;
+        this.cache = new Map();
+        this.saveTimeout = null;
+        this.init();
+    }
+
+    normalizeKey(key) {
+        if (!key || typeof key !== 'string') return '';
+        if (key.startsWith('spotify:track:')) return key.slice('spotify:track:'.length).trim();
+        return key.trim();
+    }
+
+    init() {
+        try {
+            if (fs.existsSync(this.filePath)) {
+                const raw = fs.readFileSync(this.filePath, 'utf8');
+                const data = JSON.parse(raw);
+                if (data && typeof data === 'object') {
+                    const now = Date.now();
+                    const entries = Array.isArray(data.entries) ? data.entries : Object.entries(data).map(([k, v]) => ({ key: k, ...v }));
+                    for (const entry of entries) {
+                        const key = this.normalizeKey(entry.key || entry.id);
+                        if (!key || !entry.videoId) continue;
+                        if (entry.expiresAt && entry.expiresAt <= now) continue;
+                        this.cache.set(key, {
+                            videoId: entry.videoId,
+                            matchedTitle: entry.matchedTitle || '',
+                            score: entry.score || entry.confidence || 0.9,
+                            confidence: entry.confidence || entry.score || 0.9,
+                            expiresAt: entry.expiresAt || (now + this.ttlMs)
+                        });
+                    }
+                    this.logger.info(`Spotify match cache loaded ${this.cache.size} valid entries from ${this.filePath}`);
+                }
+            }
+        } catch (err) {
+            this.logger.warn(`Failed to load Spotify match cache from ${this.filePath}: ${err.message}`);
+        }
+    }
+
+    get(key) {
+        const norm = this.normalizeKey(key);
+        if (!norm || !this.cache.has(norm)) return null;
+        const entry = this.cache.get(norm);
+        if (Date.now() > entry.expiresAt) {
+            this.cache.delete(norm);
+            this.scheduleSave();
+            return null;
+        }
+        this.cache.delete(norm);
+        this.cache.set(norm, entry);
+        return entry;
+    }
+
+    set(key, matchData) {
+        const norm = this.normalizeKey(key);
+        if (!norm || !matchData || !matchData.videoId) return;
+        const confidence = Number(matchData.confidence ?? matchData.score ?? 0);
+        if (confidence < 0.9) return;
+
+        if (this.cache.has(norm)) {
+            this.cache.delete(norm);
+        } else if (this.cache.size >= this.maxSize) {
+            const oldestKey = this.cache.keys().next().value;
+            if (oldestKey) this.cache.delete(oldestKey);
+        }
+
+        this.cache.set(norm, {
+            videoId: matchData.videoId,
+            matchedTitle: matchData.matchedTitle || '',
+            score: matchData.score ?? confidence,
+            confidence: confidence,
+            expiresAt: Date.now() + this.ttlMs
+        });
+
+        this.scheduleSave();
+    }
+
+    invalidate(key) {
+        const norm = this.normalizeKey(key);
+        if (!norm) return false;
+        if (this.cache.delete(norm)) {
+            this.logger.info(`Spotify match cache invalidated entry: ${norm}`);
+            this.scheduleSave();
+            return true;
+        }
+        return false;
+    }
+
+    invalidateByVideoId(videoId) {
+        if (!videoId) return false;
+        let removed = 0;
+        for (const [k, v] of this.cache.entries()) {
+            if (v.videoId === videoId) {
+                this.cache.delete(k);
+                removed++;
+            }
+        }
+        if (removed > 0) {
+            this.logger.info(`Spotify match cache invalidated ${removed} entry/entries for video ID: ${videoId}`);
+            this.scheduleSave();
+            return true;
+        }
+        return false;
+    }
+
+    scheduleSave() {
+        if (this.saveTimeout) return;
+        this.saveTimeout = setTimeout(() => {
+            this.saveTimeout = null;
+            this.flush();
+        }, 1000);
+    }
+
+    flush() {
+        if (this.saveTimeout) {
+            clearTimeout(this.saveTimeout);
+            this.saveTimeout = null;
+        }
+        try {
+            const dir = path.dirname(this.filePath);
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+            const entries = [];
+            const now = Date.now();
+            for (const [key, val] of this.cache.entries()) {
+                if (val.expiresAt > now) {
+                    entries.push({ key, ...val });
+                }
+            }
+
+            const payload = JSON.stringify({ version: 1, updatedAt: new Date().toISOString(), entries }, null, 2);
+            const tmpPath = `${this.filePath}.tmp.${process.pid}.${Date.now()}`;
+            fs.writeFileSync(tmpPath, payload, 'utf8');
+            fs.renameSync(tmpPath, this.filePath);
+        } catch (err) {
+            this.logger.warn(`Failed to atomically save Spotify match cache: ${err.message}`);
+        }
+    }
+}
+
+const spotifyMatchCache = new SpotifyMatchCache({
+    filePath: SPOTIFY_MATCH_CACHE_FILE,
+    maxSize: SPOTIFY_MATCH_CACHE_MAX_SIZE,
+    ttlMs: SPOTIFY_MATCH_CACHE_TTL_MS,
+    logger: Logger
+});
+
 async function findSpotifyCandidates(track, signal, logger = Logger, excludedVideoIds = new Set()) {
     const MATCH_THRESHOLD = 0.58;       // Minimum confidence score required
     const MAX_SEARCH_QUERIES = 2;       // Maximum search query variations attempted per track
@@ -2180,9 +2343,20 @@ async function findSpotifyCandidates(track, signal, logger = Logger, excludedVid
     const collectedCandidates = [];
     const seenIds = new Set();
 
-    for (let i = 0; i < queries.length; i++) {
-        const query = queries[i];
-        const entries = await searchYouTubeCandidates(query, MAX_CANDIDATES_PER_QUERY, signal, logger);
+    // Execute search queries in parallel
+    const queryResults = await Promise.all(
+        queries.map(q => searchYouTubeCandidates(q, MAX_CANDIDATES_PER_QUERY, signal, logger))
+    );
+
+    // Log the first query's best score
+    if (queries.length > 0) {
+        const q1Entries = queryResults[0] || [];
+        const q1Ranked = rankCandidates(track, q1Entries, { threshold: MATCH_THRESHOLD });
+        const q1BestScore = q1Ranked[0]?.score ?? 0;
+        logger.info(`[Spotify search] First query "${sanitizeAsciiHeader(queries[0])}" best score: ${(q1BestScore * 100).toFixed(0)}%`);
+    }
+
+    for (const entries of queryResults) {
         for (const entry of entries) {
             const id = entry?.id || entry?.url;
             if (id && !seenIds.has(id)) {
@@ -2230,11 +2404,36 @@ async function downloadSpotifyAudioWithFallback({
     onProgress,
     logger = Logger,
     jobExcludedVideoIds = new Set(),
-    onNote = null
+    onNote = null,
+    candidatesOverride = null
 }) {
-    const candidates = await findSpotifyCandidates(track, signal, logger, jobExcludedVideoIds);
+    const spotifyTrackId = track?.id || track?.uri || '';
+    let candidates = candidatesOverride;
+
     if (!candidates || candidates.length === 0) {
-        throw new AppError('NO_MATCH', { userMessage: 'No search result matched the Spotify title, artist, and duration closely enough.' });
+        if (spotifyTrackId) {
+            const cached = spotifyMatchCache.get(spotifyTrackId);
+            if (cached && !jobExcludedVideoIds.has(cached.videoId) && !ageRestrictedCache.has(cached.videoId)) {
+                logger.info(`[Spotify match cache hit] ${sanitizeAsciiHeader(track.title)} - ${sanitizeAsciiHeader(track.artist)} -> ${sanitizeAsciiHeader(cached.matchedTitle || '')} [${cached.videoId}] (confidence ${(cached.score * 100).toFixed(0)}%)`);
+                candidates = [{
+                    videoId: cached.videoId,
+                    score: cached.score,
+                    confidence: cached.confidence,
+                    matchedTitle: cached.matchedTitle,
+                    reasons: ['cached_match']
+                }];
+            }
+        }
+
+        if (!candidates || candidates.length === 0) {
+            candidates = await findSpotifyCandidates(track, signal, logger, jobExcludedVideoIds);
+            if (!candidates || candidates.length === 0) {
+                throw new AppError('NO_MATCH', { userMessage: 'No search result matched the Spotify title, artist, and duration closely enough.' });
+            }
+            if (spotifyTrackId && candidates[0]?.score >= 0.9) {
+                spotifyMatchCache.set(spotifyTrackId, candidates[0]);
+            }
+        }
     }
 
     const maxAttempts = Math.min(3, candidates.length);
@@ -2267,9 +2466,18 @@ async function downloadSpotifyAudioWithFallback({
                 onNote?.('alternate version used');
             }
 
+            if (spotifyTrackId && candidate.score >= 0.9) {
+                spotifyMatchCache.set(spotifyTrackId, candidate);
+            }
+
             return { tempAudioPath, candidate, alternateUsed: isAlternate };
         } catch (err) {
             lastError = err;
+            const appErr = classifyError(err, err?.stderr || '');
+            if (appErr.code === 'AGE_RESTRICTED' || appErr.code === 'UNAVAILABLE') {
+                if (spotifyTrackId) spotifyMatchCache.invalidate(spotifyTrackId);
+                spotifyMatchCache.invalidateByVideoId(candidate.videoId);
+            }
             if (err?.code === 'AGE_RESTRICTED') {
                 logger.warn(`Spotify age-gate fallback: candidate ${candidate.videoId} failed with AGE_RESTRICTED. Adding to 24h cache and job excluded set.`);
                 ageRestrictedCache.add(candidate.videoId);
@@ -3214,7 +3422,7 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal, report =
             return null;
         })();
 
-        if (track.url) {
+        if (track.url && !track.candidates) {
             if (!isSafeUrl(track.url)) throw new Error('Invalid playlist track URL.');
             report(index, { state: 'downloading', progress: 0 });
             const matchedVideoId = track.videoId || extractSingleVideoId(new URL(track.url));
@@ -3290,6 +3498,7 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal, report =
                 onProgress: fraction => report(index, { state: 'downloading', progress: fraction }),
                 logger: trackLogger,
                 jobExcludedVideoIds,
+                candidatesOverride: track.candidates || null,
                 onNote: n => {
                     note = n;
                     report(index, { note: n });
@@ -3524,25 +3733,97 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             };
 
             try {
-                const handoffQueue = new AsyncBoundedQueue(4);
-                let nextTrack = 0;
+                const searchCapacity = Math.max(8, SPOTIFY_SEARCH_CONCURRENCY * 2);
+                const searchHandoffQueue = new AsyncBoundedQueue(searchCapacity);
+                const encodeHandoffQueue = new AsyncBoundedQueue(4);
+                let nextSearchTrack = 0;
+
+                const isSpotifyCollection = spotifyLink && spotifyLink.type !== 'track';
+
+                const searchWorker = async () => {
+                    while (!signal.aborted) {
+                        const index = nextSearchTrack++;
+                        if (index >= tracks.length) return;
+                        const track = tracks[index];
+                        report(index, { state: 'matching', progress: 0 });
+
+                        if (!isSpotifyCollection) {
+                            // YouTube playlist track: already has url
+                            try {
+                                await searchHandoffQueue.push({ track, index });
+                            } catch {
+                                return;
+                            }
+                            continue;
+                        }
+
+                        // Spotify track: resolve candidate in search-ahead stage
+                        try {
+                            const spotifyTrackId = track.id || track.uri;
+                            let matchedCandidates = null;
+
+                            if (spotifyTrackId) {
+                                const cached = spotifyMatchCache.get(spotifyTrackId);
+                                if (cached && !jobExcludedVideoIds.has(cached.videoId) && !ageRestrictedCache.has(cached.videoId)) {
+                                    taskLogger.info(`[Spotify match cache hit] [track:${index + 1}] ${sanitizeAsciiHeader(track.title)} - ${sanitizeAsciiHeader(track.artist)} -> ${sanitizeAsciiHeader(cached.matchedTitle || '')} [${cached.videoId}]`);
+                                    matchedCandidates = [{
+                                        videoId: cached.videoId,
+                                        score: cached.score,
+                                        confidence: cached.confidence,
+                                        matchedTitle: cached.matchedTitle,
+                                        reasons: ['cached_match']
+                                    }];
+                                }
+                            }
+
+                            if (!matchedCandidates) {
+                                matchedCandidates = await findSpotifyCandidates(track, signal, taskLogger.child({ trackIndex: index }), jobExcludedVideoIds);
+                                if (matchedCandidates && matchedCandidates.length > 0 && spotifyTrackId && matchedCandidates[0]?.score >= 0.9) {
+                                    spotifyMatchCache.set(spotifyTrackId, matchedCandidates[0]);
+                                }
+                            }
+
+                            if (!matchedCandidates || matchedCandidates.length === 0) {
+                                taskLogger.warn(`[track:${index + 1}] No matching YouTube candidate found for Spotify track: ${sanitizeAsciiHeader(track.title)} - ${sanitizeAsciiHeader(track.artist)}`);
+                                report(index, { state: 'failed', error: 'No YouTube match found.' });
+                                continue;
+                            }
+
+                            const resolvedTrack = {
+                                ...track,
+                                candidates: matchedCandidates,
+                                url: `https://www.youtube.com/watch?v=${matchedCandidates[0].videoId}`,
+                                videoId: matchedCandidates[0].videoId
+                            };
+
+                            await searchHandoffQueue.push({ track: resolvedTrack, index });
+                        } catch (searchErr) {
+                            if (signal.aborted) return;
+                            taskLogger.warn(`[track:${index + 1}] Search error: ${searchErr.message}`);
+                            report(index, { state: 'failed', error: searchErr.message });
+                        }
+                    }
+                };
+
                 const downloadWorker = async () => {
                     while (!signal.aborted) {
-                        const index = nextTrack++;
-                        if (index >= tracks.length) return;
-                        const downloaded = await downloadPlaylistTrack(tracks[index], index, audioFormat, signal, report, taskLogger, jobExcludedVideoIds);
+                        const item = await searchHandoffQueue.shift();
+                        if (!item) return;
+                        const { track, index } = item;
+                        const downloaded = await downloadPlaylistTrack(track, index, audioFormat, signal, report, taskLogger, jobExcludedVideoIds);
                         if (!downloaded) continue;
                         try {
-                            await handoffQueue.push(downloaded);
+                            await encodeHandoffQueue.push(downloaded);
                         } catch {
                             cleanupFiles([downloaded.tempAudioPath, downloaded.tempImgPath]);
                             return;
                         }
                     }
                 };
+
                 const encodeWorker = async () => {
                     while (!signal.aborted) {
-                        const downloaded = await handoffQueue.shift();
+                        const downloaded = await encodeHandoffQueue.shift();
                         if (!downloaded) return;
                         const result = await processPlaylistTrack(downloaded, audioBitrate, audioFormat, signal, report, taskLogger, job);
                         if (signal.aborted) {
@@ -3558,11 +3839,18 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                     }
                 };
 
-                const encodeWorkers = Array.from({ length: ENCODE_CONCURRENCY }, () => encodeWorker());
+                const searchWorkerCount = isSpotifyCollection
+                    ? Math.min(SPOTIFY_SEARCH_CONCURRENCY, tracks.length)
+                    : 1;
+                const searchWorkers = Array.from({ length: searchWorkerCount }, () => searchWorker());
                 const downloadWorkers = Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, tracks.length) }, () => downloadWorker());
-                await Promise.all(downloadWorkers);
-                handoffQueue.close();
-                await Promise.all(encodeWorkers);
+                const encodeWorkers = Array.from({ length: ENCODE_CONCURRENCY }, () => encodeWorker());
+
+                const searchPromise = Promise.all(searchWorkers).then(() => searchHandoffQueue.close());
+                const downloadPromise = Promise.all(downloadWorkers).then(() => encodeHandoffQueue.close());
+                const encodePromise = Promise.all(encodeWorkers);
+
+                await Promise.all([searchPromise, downloadPromise, encodePromise]);
 
                 if (signal.aborted) throw new AppError('CANCELLED');
                 if (addedTracks === 0) {
@@ -3920,12 +4208,17 @@ module.exports = {
     redactLog,
     AgeGateLruCache,
     ageRestrictedCache,
+    generateSearchQueries,
+    rankCandidates,
+    searchYouTubeCandidates,
     findSpotifyCandidates,
     downloadSpotifyAudioWithFallback,
     AgeGateCookiePool,
     buildContentDisposition,
     SpotifyCoverCache,
     spotifyCoverCache,
+    SpotifyMatchCache,
+    spotifyMatchCache,
     fetchSpotifyTrackCoverUrl,
     fetchYouTubeThumbnailBuffer,
     fetchCoverBuffer,

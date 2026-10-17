@@ -30,6 +30,7 @@ yarn-error.log*
 *.flac
 *.zip
 *player-script*.js
+cache/
 
 # OS & Editor files
 .DS_Store
