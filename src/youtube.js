@@ -25,7 +25,6 @@ const {
     downloadMetaMap,
     sanitizeFilename,
     sanitizeAsciiHeader,
-    buildContentDisposition,
     cleanupFiles,
     parseCoverUrl,
     cropToSquareJpeg,
@@ -1409,7 +1408,7 @@ async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, r
     }
 }
 
-async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res, filename = '', artist = '', signal, req = null, logger = Logger, isTempFile = false) {
+async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res, filename = '', artist = '', signal, _req = null, logger = Logger, isTempFile = false) {
     const tempFiles = [];
 
     // clean up temp files if the user closes their browser or cancels

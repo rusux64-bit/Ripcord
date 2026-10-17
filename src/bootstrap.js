@@ -9,9 +9,7 @@ const {
     TRUST_PROXY_HOPS,
     PUBLIC_DIR,
     WORK_DIR,
-    COOKIES_PATH,
-    aria2cAvailable,
-    YTDLP_USE_ARIA2C
+    COOKIES_PATH
 } = require('./config');
 const { Logger } = require('./logger');
 const { AppError, classifyError, sendError } = require('./errors');
@@ -102,7 +100,7 @@ function createApp() {
     registerRoutes(app);
 
     // Unhandled request error handler
-    app.use((err, req, res, next) => {
+    app.use((err, req, res, _next) => {
         Logger.error(`Unhandled request error: ${err.message}`);
         if (res.headersSent) return res.destroy();
         sendError(res, classifyError(err), req);

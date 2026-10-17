@@ -1,5 +1,4 @@
 const path = require('path');
-const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { Transform } = require('stream');
 const axios = require('axios');
@@ -22,7 +21,6 @@ const { AppError, classifyError, sendError } = require('./errors');
 const { AsyncBoundedQueue, downloadQueue, metadataSemaphore } = require('./queue');
 const {
     sanitizeFilename,
-    sanitizeAsciiHeader,
     buildContentDisposition,
     cleanupFiles,
     parseCoverUrl

@@ -5,9 +5,40 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: ripcord
-    ports:
-      - "5224:5224"
     restart: unless-stopped
+
+    # Security Hardening
+    # Run as unprivileged node user (UID 1000, GID 1000)
+    user: "1000:1000"
+    # Mount root filesystem as read-only
+    read_only: true
+    # Drop all Linux capabilities
+    cap_drop:
+      - ALL
+    # Prevent privilege escalation
+    security_opt:
+      - no-new-privileges:true
+
+    # Writable temporary filesystems mounted in RAM
+    tmpfs:
+      # Temporary audio downloads, conversions, and cookie isolation copies
+      - /tmp:size=1G,uid=1000,gid=1000,mode=1777
+      # Ephemeral Spotify match cache storage if volume is not mapped
+      - /app/cache:size=100M,uid=1000,gid=1000,mode=0755
+
+    # Resource Constraints
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2048M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+
+    ports:
+      - "${PORT:-5224}:5224"
+
     environment:
       NODE_ENV: production
       PORT: ${PORT:-5224}
@@ -15,9 +46,19 @@ services:
       RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
       DOWNLOAD_CONCURRENCY: ${DOWNLOAD_CONCURRENCY:-4}
       ENCODE_CONCURRENCY: ${ENCODE_CONCURRENCY:-2}
+      SPOTIFY_SEARCH_CONCURRENCY: ${SPOTIFY_SEARCH_CONCURRENCY:-6}
       MAX_QUEUED_DOWNLOADS: ${MAX_QUEUED_DOWNLOADS:-8}
       MAX_PLAYLIST_TRACKS: ${MAX_PLAYLIST_TRACKS:-30}
       TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-0}
-    # Optional: mount cookies.txt if hosting on a datacenter IP
+      YTDLP_AUTHED_CLIENTS: ${YTDLP_AUTHED_CLIENTS:-web_embedded,web}
+      # AGE_GATE_COOKIES: "off"
+      # YTDLP_AGE_COOKIES_DIR: "/app/age_cookies"
+
+    # Optional Volume Mounts for Persistence & Cookies
     # volumes:
+    #   # Persistent Spotify-to-YouTube match cache across restarts:
+    #   - ./cache:/app/cache
+    #   # Dedicated throwaway age-gate cookie accounts directory (read-only):
+    #   - ./age_cookies:/app/age_cookies:ro
+    #   # [Deprecated] Single fallback cookie file:
     #   - ./cookies.txt:/app/cookies.txt:ro

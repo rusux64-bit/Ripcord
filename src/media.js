@@ -158,7 +158,7 @@ async function fetchCoverBuffer(urlString, signal = null) {
     return null;
 }
 
-async function cropToSquareJpeg(inputPath, outputPath, logger = Logger) {
+async function cropToSquareJpeg(inputPath, outputPath, _logger = Logger) {
     return new Promise(resolve => {
         const proc = spawn(ffmpegPath, [
             '-hide_banner', '-loglevel', 'error', '-nostats', '-y',
