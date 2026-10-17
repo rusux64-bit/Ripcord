@@ -7,7 +7,8 @@ const {
     PUBLIC_DIR,
     AGE_GATE_COOKIES_ENABLED,
     YTDLP_AGE_COOKIES_DIR,
-    COOKIE_BUDGET_CACHE_FILE
+    COOKIE_BUDGET_CACHE_FILE,
+    COOKIE_GUARD_SECRET_FILE
 } = require('./config');
 const { Logger } = require('./logger');
 
@@ -259,6 +260,7 @@ class CookieGuard {
     constructor({
         pool = null,
         budgetFile = COOKIE_BUDGET_CACHE_FILE,
+        secretFile = COOKIE_GUARD_SECRET_FILE,
         workDir = WORK_DIR,
         logger = Logger,
         perAccountHourlyLimit = 20,
@@ -279,8 +281,10 @@ class CookieGuard {
     } = {}) {
         this.pool = pool;
         this.budgetFile = budgetFile;
+        this.secretFile = secretFile;
         this.workDir = workDir;
         this.logger = logger;
+        this.serverSecret = this.initServerSecret(this.secretFile);
         this.perAccountHourlyLimit = perAccountHourlyLimit;
         this.perAccountDailyLimit = perAccountDailyLimit;
         this.globalHourlyLimit = globalHourlyLimit;
@@ -359,6 +363,39 @@ class CookieGuard {
         return this.dailySalt;
     }
 
+    initServerSecret(secretFile) {
+        if (!secretFile) {
+            return crypto.randomBytes(32).toString('hex');
+        }
+        try {
+            const dir = path.dirname(secretFile);
+            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+            if (fs.existsSync(secretFile)) {
+                const stat = fs.statSync(secretFile);
+                if ((stat.mode & 0o077) !== 0) {
+                    this.logger.warn(`[cookie_guard] Server secret file permissions broader than owner-only (mode 0${(stat.mode & 0o777).toString(8)})`);
+                }
+                const secret = fs.readFileSync(secretFile, 'utf8').trim();
+                if (secret.length >= 32) return secret;
+            }
+
+            const newSecret = crypto.randomBytes(32).toString('hex');
+            const fd = fs.openSync(secretFile, 'w', 0o600);
+            fs.writeSync(fd, newSecret);
+            fs.closeSync(fd);
+            return newSecret;
+        } catch (err) {
+            this.logger.warn(`[cookie_guard] Could not initialize secret file: ${err.message}. Using ephemeral in-memory secret.`);
+            return crypto.randomBytes(32).toString('hex');
+        }
+    }
+
+    hmacKey(val) {
+        if (!val || typeof val !== 'string') return 'unknown';
+        return crypto.createHmac('sha256', this.serverSecret).update(val).digest('hex');
+    }
+
     hashIp(ip) {
         if (!ip || typeof ip !== 'string') return 'unknown';
         const salt = this.getDailySalt();
@@ -380,27 +417,69 @@ class CookieGuard {
     }
 
     getIpRecord(ip) {
-        let rec = this.ipUsage.get(ip);
+        const key = this.hmacKey(ip);
+        let rec = this.ipUsage.get(key);
         if (!rec) {
             rec = {
                 hourly: [],
                 daily: [],
                 videoIds: new Map(),
                 blockedUntil: 0,
-                strikes: 0
+                strikes: 0,
+                lastSeen: Date.now()
             };
-            this.ipUsage.set(ip, rec);
+            this.ipUsage.set(key, rec);
         }
+        rec.lastSeen = Date.now();
         return rec;
     }
 
     getSubnetRecord(subnet) {
-        let rec = this.subnetUsage.get(subnet);
+        const key = this.hmacKey(subnet);
+        let rec = this.subnetUsage.get(key);
         if (!rec) {
-            rec = { hourly: [], daily: [] };
-            this.subnetUsage.set(subnet, rec);
+            rec = { hourly: [], daily: [], lastSeen: Date.now() };
+            this.subnetUsage.set(key, rec);
         }
+        rec.lastSeen = Date.now();
         return rec;
+    }
+
+    pruneBudgets() {
+        const now = Date.now();
+        const oneHourAgo = now - 3600000;
+        const oneDayAgo = now - 86400000;
+        const sevenDaysAgo = now - 7 * 86400000;
+
+        this.globalUsage = this.globalUsage.filter(ts => ts > oneHourAgo);
+
+        for (const [key, rec] of this.ipUsage.entries()) {
+            rec.hourly = rec.hourly.filter(ts => ts > oneHourAgo);
+            rec.daily = rec.daily.filter(ts => ts > oneDayAgo);
+            for (const [v, ts] of rec.videoIds.entries()) {
+                if (ts <= oneHourAgo) rec.videoIds.delete(v);
+            }
+
+            const lastActivity = Math.max(rec.lastSeen || 0, rec.blockedUntil || 0, ...rec.daily);
+            if (rec.hourly.length === 0 && rec.daily.length === 0 && rec.videoIds.size === 0) {
+                if (rec.strikes > 0) {
+                    if (lastActivity < sevenDaysAgo) {
+                        this.ipUsage.delete(key);
+                    }
+                } else if (lastActivity < oneDayAgo) {
+                    this.ipUsage.delete(key);
+                }
+            }
+        }
+
+        for (const [key, rec] of this.subnetUsage.entries()) {
+            rec.hourly = rec.hourly.filter(ts => ts > oneHourAgo);
+            rec.daily = rec.daily.filter(ts => ts > oneDayAgo);
+            const lastActivity = Math.max(rec.lastSeen || 0, ...rec.daily);
+            if (rec.hourly.length === 0 && rec.daily.length === 0 && lastActivity < oneDayAgo) {
+                this.subnetUsage.delete(key);
+            }
+        }
     }
 
     getAccountUsage(accountId) {
@@ -956,6 +1035,7 @@ class CookieGuard {
                 this.failedCookieCache.delete(vid);
             }
         }
+        this.pruneBudgets();
     }
 
     logSummary() {
@@ -1014,19 +1094,39 @@ class CookieGuard {
                     }
 
                     if (data.ipUsage) {
-                        for (const [ip, rec] of Object.entries(data.ipUsage)) {
+                        let discardedCount = 0;
+                        for (const [key, rec] of Object.entries(data.ipUsage)) {
+                            if (!/^[0-9a-f]{64}$/i.test(key)) {
+                                discardedCount++;
+                                continue;
+                            }
                             const videoIds = new Map();
                             if (rec.videoIds) {
                                 for (const [v, ts] of Object.entries(rec.videoIds)) {
                                     if (ts > now - 3600000) videoIds.set(v, ts);
                                 }
                             }
-                            this.ipUsage.set(ip, {
+                            this.ipUsage.set(key, {
                                 hourly: (rec.hourly || []).filter(ts => ts > now - 3600000),
                                 daily: (rec.daily || []).filter(ts => ts > oneDayAgo),
                                 videoIds,
                                 blockedUntil: rec.blockedUntil || 0,
-                                strikes: rec.strikes || 0
+                                strikes: rec.strikes || 0,
+                                lastSeen: rec.lastSeen || now
+                            });
+                        }
+                        if (discardedCount > 0) {
+                            this.logger.info(`[cookie_guard] Discarded ${discardedCount} legacy unhashed IP entries from cookie_budgets.json for privacy`);
+                        }
+                    }
+
+                    if (data.subnetUsage) {
+                        for (const [key, rec] of Object.entries(data.subnetUsage)) {
+                            if (!/^[0-9a-f]{64}$/i.test(key)) continue;
+                            this.subnetUsage.set(key, {
+                                hourly: (rec.hourly || []).filter(ts => ts > now - 3600000),
+                                daily: (rec.daily || []).filter(ts => ts > oneDayAgo),
+                                lastSeen: rec.lastSeen || now
                             });
                         }
                     }
@@ -1037,6 +1137,7 @@ class CookieGuard {
                         this.circuitBreaker.botChecks = (data.circuitBreaker.botChecks || []).filter(b => b.ts > now - 15 * 60 * 1000);
                     }
 
+                    this.pruneBudgets();
                     this.logger.info(`[cookie_guard] Restored persisted budgets from ${path.basename(this.budgetFile)}`);
                 }
             }
@@ -1060,6 +1161,7 @@ class CookieGuard {
         }
         if (!this.budgetFile) return;
         try {
+            this.pruneBudgets();
             const dir = path.dirname(this.budgetFile);
             if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
@@ -1069,17 +1171,27 @@ class CookieGuard {
             }
 
             const ipUsageObj = {};
-            for (const [ip, rec] of this.ipUsage.entries()) {
+            for (const [key, rec] of this.ipUsage.entries()) {
                 const vidObj = {};
                 for (const [vid, ts] of rec.videoIds.entries()) {
                     vidObj[vid] = ts;
                 }
-                ipUsageObj[ip] = {
+                ipUsageObj[key] = {
                     hourly: rec.hourly,
                     daily: rec.daily,
                     videoIds: vidObj,
                     blockedUntil: rec.blockedUntil,
-                    strikes: rec.strikes
+                    strikes: rec.strikes,
+                    lastSeen: rec.lastSeen || Date.now()
+                };
+            }
+
+            const subnetUsageObj = {};
+            for (const [key, rec] of this.subnetUsage.entries()) {
+                subnetUsageObj[key] = {
+                    hourly: rec.hourly,
+                    daily: rec.daily,
+                    lastSeen: rec.lastSeen || Date.now()
                 };
             }
 
@@ -1089,6 +1201,7 @@ class CookieGuard {
                 globalUsage: this.globalUsage,
                 accountUsage: accountUsageObj,
                 ipUsage: ipUsageObj,
+                subnetUsage: subnetUsageObj,
                 circuitBreaker: {
                     state: this.circuitBreaker.state,
                     pausedUntil: this.circuitBreaker.pausedUntil,
@@ -1125,6 +1238,7 @@ const ageRestrictedCache = new AgeGateLruCache(1000, 24 * 60 * 60 * 1000);
 const cookieGuard = new CookieGuard({
     pool: ageGateCookiePool,
     budgetFile: COOKIE_BUDGET_CACHE_FILE,
+    secretFile: COOKIE_GUARD_SECRET_FILE,
     workDir: WORK_DIR,
     logger: Logger
 });
