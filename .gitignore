@@ -10,6 +10,7 @@ cookies/
 age_cookies/
 *.cookies
 ripcord_cookie_*.tmp
+none
 
 # Logs
 logs/

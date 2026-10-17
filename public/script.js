@@ -200,6 +200,67 @@ function safeName(text) {
     return String(text).replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '').replace(/\s+/g, ' ').trim();
 }
 
+function resolveDownloadName(dispositionHeader, info, isCollection, format = 'mp3') {
+    const cleanFmt = String(format || 'mp3').toLowerCase().replace(/[^a-z0-9]/g, '') || 'mp3';
+    const expectedExt = isCollection ? 'zip' : cleanFmt;
+    const extSuffix = `.${expectedExt}`;
+
+    const ensureExtension = name => {
+        if (!name) return '';
+        if (name.toLowerCase().endsWith(extSuffix.toLowerCase())) {
+            return name.slice(0, -extSuffix.length) + extSuffix;
+        }
+        return `${name}${extSuffix}`;
+    };
+
+    // 1. Content-Disposition: prefer RFC 5987 filename*=UTF-8''..., fall back to filename="..."
+    if (dispositionHeader && typeof dispositionHeader === 'string') {
+        let candidate = '';
+
+        // Match RFC 5987: filename*=UTF-8''<encoded> or filename*=charset'lang'<encoded>
+        const rfcMatch = dispositionHeader.match(/filename\*\s*=\s*(?:[A-Za-z0-9_-]+)'[^']*'([^;]+)/i);
+        if (rfcMatch && rfcMatch[1]) {
+            try {
+                const rawVal = rfcMatch[1].trim().replace(/^["']|["']$/g, '');
+                const decoded = decodeURIComponent(rawVal);
+                if (decoded) candidate = decoded;
+            } catch { /* ignore and fall through */ }
+        }
+
+        // Match standard filename="..." or filename=token
+        if (!candidate) {
+            const stdMatch = dispositionHeader.match(/filename\s*=\s*(?:"([^"]+)"|([^;\s]+))/i);
+            if (stdMatch) {
+                candidate = (stdMatch[1] || stdMatch[2] || '').trim();
+            }
+        }
+
+        if (candidate) {
+            candidate = candidate.replace(/^.*[\\/]/, '');
+            const sanitized = safeName(candidate);
+            if (sanitized && sanitized !== extSuffix && sanitized !== `.${expectedExt}`) {
+                return ensureExtension(sanitized);
+            }
+        }
+    }
+
+    // 2. Collection or track title from state.info (sanitized)
+    if (info) {
+        const rawTitle = info.title || info.name || '';
+        const sanitizedTitle = safeName(rawTitle);
+        if (sanitizedTitle) {
+            return ensureExtension(sanitizedTitle);
+        }
+    }
+
+    // 3. Generic fallback
+    if (isCollection) {
+        const dateStr = new Date().toISOString().slice(0, 10);
+        return `ripcord-playlist-${dateStr}.zip`;
+    }
+    return `ripcord.${cleanFmt}`;
+}
+
 // Multilingual title cleaner patterns.
 // Adding a language is a single one-line entry in LANG_PATTERNS with an array of junk phrases/tokens.
 // Matching lowers, NFKD-normalizes, strips combining marks, and folds ё->е for the test only.
@@ -1517,6 +1578,7 @@ function startDownload(ageConfirmed = false) {
         if (customTitle) params.set('title', customTitle);
     }
     const saveName = isCollection ? `${safeName(info.title) || 'ripcord'}.zip` : `${name}.${fmt}`;
+    state.blobName = saveName;
 
     logClientEvent('action', 'Initiated download', { format: fmt, bitrate, isCollection, ageConfirmed });
 
@@ -1562,11 +1624,13 @@ function startDownload(ageConfirmed = false) {
         if (xhr.status >= 200 && xhr.status < 300) {
             setProgress(1);
             state.blob = xhr.response;
+            const dispositionHeader = xhr.getResponseHeader('Content-Disposition') || '';
+            state.blobName = resolveDownloadName(dispositionHeader, info, isCollection, fmt);
             const noteHeader = xhr.getResponseHeader('X-Ripcord-Note');
             if (noteHeader) {
                 logClientEvent('api', `Server note: ${noteHeader}`);
             }
-            logClientEvent('api', 'Download completed successfully', { status: xhr.status, size: state.blob.size });
+            logClientEvent('api', 'Download completed successfully', { status: xhr.status, size: state.blob.size, name: state.blobName });
             saveBlob();
             finish(isCollection);
         } else {
@@ -1800,6 +1864,10 @@ function stopPolling() {
 
 function saveBlob() {
     if (!state.blob) return;
+    if (!state.blobName) {
+        const isCollection = state.mode === 'playlist' || state.info?.type === 'collection';
+        state.blobName = resolveDownloadName('', state.info, isCollection, currentFormat());
+    }
     const href = URL.createObjectURL(state.blob);
     const a = document.createElement('a');
     a.href = href;
@@ -1904,6 +1972,7 @@ el.saveBtn.addEventListener('click', () => {
 el.againBtn.addEventListener('click', () => {
     logClientEvent('action', 'Resetting to rip another track');
     state.blob = null;
+    state.blobName = '';
     state.info = null;
     state.lastJob = null;
     clearErrorBanner('input');
@@ -1923,6 +1992,8 @@ syncPasteButton();
 setupSpin();
 syncThemeColorMeta();
 initColourEngine();
+
+window.resolveDownloadName = resolveDownloadName;
 
 setTimeout(() => {
     delete root.dataset.intro;

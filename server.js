@@ -39,7 +39,18 @@ const ytdlpAvailable = checkYtdlp.status === 0;
 const ytdlpVersion = ytdlpAvailable ? checkYtdlp.stdout.toString().trim() : 'NOT INSTALLED';
 
 // optional cookies file if youtube starts blocking downloads
-const COOKIES_PATH = process.env.YTDLP_COOKIES_PATH || (fs.existsSync(path.join(__dirname, 'cookies.txt')) ? path.join(__dirname, 'cookies.txt') : null);
+function resolveCookiesPath() {
+    const raw = (process.env.YTDLP_COOKIES_PATH || '').trim();
+    if (raw && raw.toLowerCase() !== 'none' && raw.toLowerCase() !== 'false' && fs.existsSync(raw)) {
+        return raw;
+    }
+    const defaultFile = path.join(__dirname, 'cookies.txt');
+    if (fs.existsSync(defaultFile)) {
+        return defaultFile;
+    }
+    return null;
+}
+const COOKIES_PATH = resolveCookiesPath();
 
 function redactLog(str) {
     if (typeof str !== 'string') {
@@ -1074,6 +1085,7 @@ function createRateLimiter(limit, message) {
 
 app.use('/api', (req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Request-Id, X-Ripcord-Note');
     next();
 });
 // per-track progress for collection downloads, keyed by a client-generated job id
@@ -2122,6 +2134,35 @@ function sanitizeAsciiHeader(name) {
     return ascii || 'download';
 }
 
+function buildContentDisposition(baseName, extension) {
+    const ext = extension ? (extension.startsWith('.') ? extension.slice(1) : extension).toLowerCase().replace(/[^a-z0-9]/g, '') : '';
+    let name = String(baseName || '').trim();
+    if (ext && name.toLowerCase().endsWith(`.${ext}`)) {
+        name = name.slice(0, -(ext.length + 1)).trim();
+    }
+    const cleanExt = ext ? `.${ext}` : '';
+    const safeUtf8 = sanitizeFilename(name);
+    const finalUtf8 = safeUtf8 && safeUtf8 !== 'audio_track'
+        ? `${safeUtf8}${cleanExt}`
+        : (ext === 'zip' ? 'ripcord-playlist.zip' : `ripcord${cleanExt}`);
+
+    const encodedUtf8 = encodeURIComponent(finalUtf8)
+        .replace(/['()]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())
+        .replace(/\*/g, '%2A');
+
+    let ascii = sanitizeFilename(name)
+        .replace(/[^\x20-\x7E]/g, '')
+        .replace(/["\\;]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!ascii || ascii === 'audio_track') {
+        ascii = ext === 'zip' ? 'ripcord-playlist' : 'ripcord';
+    }
+    const asciiFilename = `${ascii.slice(0, 100)}${cleanExt}`;
+
+    return `attachment; filename="${asciiFilename}"; filename*=UTF-8''${encodedUtf8}`;
+}
+
 // helper to delete temp files when we are done with them
 function cleanupFiles(files) {
     if (!Array.isArray(files)) return;
@@ -3054,7 +3095,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
 
         // download a single youtube video
         if (isYouTubeUrl(url) && !isYouTubePlaylist(url)) {
-            res.setHeader('Content-Disposition', `attachment; filename="${asciiFilename}.${audioFormat}"`);
+            res.setHeader('Content-Disposition', buildContentDisposition(customTitle || safeFilename, audioFormat));
             res.setHeader('Content-Type', mimeType);
             const info = await getYoutubeInfo(url, signal);
             const trackTitle = customTitle || info.title;
@@ -3064,7 +3105,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
 
         // download a single spotify track
         if (spotifyLink?.type === 'track') {
-            res.setHeader('Content-Disposition', `attachment; filename="${asciiFilename}.${audioFormat}"`);
+            res.setHeader('Content-Disposition', buildContentDisposition(customTitle || safeFilename, audioFormat));
             res.setHeader('Content-Type', mimeType);
             const spotifyData = await getSpotifyData(url, signal);
             const track = spotifyData.tracks[0];
@@ -3112,8 +3153,8 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
         }
 
         if (collectionData && collectionData.tracks && collectionData.tracks.length > 0) {
-            const zipName = sanitizeAsciiHeader(`${collectionData.name}.zip`);
-            res.setHeader('Content-Disposition', `attachment; filename="${zipName}"`);
+            const zipBase = collectionData.name || customTitle || safeFilename || 'ripcord-playlist';
+            res.setHeader('Content-Disposition', buildContentDisposition(zipBase, 'zip'));
             res.setHeader('Content-Type', 'application/zip');
 
             const { ZipArchive } = await import('archiver');
@@ -3572,5 +3613,6 @@ module.exports = {
     findSpotifyCandidates,
     downloadSpotifyAudioWithFallback,
     AgeGateCookiePool,
-    ageGateCookiePool
+    ageGateCookiePool,
+    buildContentDisposition
 };
