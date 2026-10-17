@@ -1194,13 +1194,159 @@ function parseCoverUrl(urlString) {
     try {
         const parsed = new URL(urlString);
         const host = parsed.hostname.toLowerCase();
-        const allowed = ['ytimg.com', 'spotifycdn.com', 'scdn.co']
+        const allowed = ['ytimg.com', 'spotifycdn.com', 'scdn.co', 'googleusercontent.com']
             .some(domain => host === domain || host.endsWith(`.${domain}`));
         if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || !allowed) return null;
         return parsed;
     } catch (e) {
         return null;
     }
+}
+
+class SpotifyCoverCache {
+    constructor(maxSize = 500, ttlMs = 24 * 60 * 60 * 1000) {
+        this.maxSize = maxSize;
+        this.ttlMs = ttlMs;
+        this.cache = new Map();
+    }
+
+    get(key) {
+        if (!key) return null;
+        const entry = this.cache.get(key);
+        if (!entry) return null;
+        if (Date.now() > entry.expiresAt) {
+            this.cache.delete(key);
+            return null;
+        }
+        this.cache.delete(key);
+        this.cache.set(key, entry);
+        return entry.url;
+    }
+
+    set(key, url) {
+        if (!key || !url) return;
+        if (this.cache.size >= this.maxSize) {
+            const oldestKey = this.cache.keys().next().value;
+            this.cache.delete(oldestKey);
+        }
+        this.cache.set(key, { url, expiresAt: Date.now() + this.ttlMs });
+    }
+}
+const spotifyCoverCache = new SpotifyCoverCache(500, 24 * 60 * 60 * 1000);
+const spotifyOembedSemaphore = new Semaphore(4);
+
+async function fetchSpotifyTrackCoverUrl(trackUriOrId, signal = null, logger = Logger) {
+    if (!trackUriOrId) return null;
+    let trackId = '';
+    if (trackUriOrId.includes(':')) {
+        const parts = trackUriOrId.split(':');
+        trackId = parts[parts.length - 1];
+    } else {
+        trackId = trackUriOrId;
+    }
+    if (!/^[A-Za-z0-9]{15,30}$/.test(trackId)) return null;
+
+    const cached = spotifyCoverCache.get(trackId);
+    if (cached) return cached;
+
+    await spotifyOembedSemaphore.acquire(signal);
+    try {
+        const oembedUrl = `https://open.spotify.com/oembed?url=https://open.spotify.com/track/${trackId}&format=json`;
+        const res = await axios.get(oembedUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+            timeout: 3000,
+            maxRedirects: 0,
+            maxContentLength: 512 * 1024,
+            signal
+        });
+        if (res.status === 200 && res.data?.thumbnail_url) {
+            const parsed = parseCoverUrl(res.data.thumbnail_url);
+            if (parsed) {
+                const coverUrl = parsed.href;
+                spotifyCoverCache.set(trackId, coverUrl);
+                return coverUrl;
+            }
+        }
+    } catch (e) {
+        logger.debug(`Spotify oEmbed track art lookup failed for ${trackId}: ${e.message}`);
+    } finally {
+        spotifyOembedSemaphore.release();
+    }
+    return null;
+}
+
+async function fetchYouTubeThumbnailBuffer(videoId, signal = null) {
+    if (!videoId || !/^[A-Za-z0-9_-]{11}$/.test(videoId)) return null;
+    const candidates = [
+        `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`,
+        `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+        `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`
+    ];
+    for (const url of candidates) {
+        if (signal?.aborted) return null;
+        try {
+            const res = await axios.get(url, {
+                responseType: 'arraybuffer',
+                headers: { 'User-Agent': 'Mozilla/5.0' },
+                timeout: 5000,
+                maxRedirects: 0,
+                maxContentLength: MAX_COVER_BYTES,
+                signal
+            });
+            if (res.status === 200 && res.data && res.data.length > 1000) {
+                return { buffer: Buffer.from(res.data), url };
+            }
+        } catch {
+            // try next candidate
+        }
+    }
+    return null;
+}
+
+async function fetchCoverBuffer(urlString, signal = null) {
+    const safeUrl = parseCoverUrl(urlString);
+    if (!safeUrl) return null;
+    try {
+        const res = await axios.get(safeUrl.href, {
+            responseType: 'arraybuffer',
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            timeout: 6000,
+            maxRedirects: 0,
+            maxContentLength: MAX_COVER_BYTES,
+            signal
+        });
+        if (res.status === 200 && res.data && res.data.length > 500) {
+            return Buffer.from(res.data);
+        }
+    } catch {
+        return null;
+    }
+    return null;
+}
+
+async function cropToSquareJpeg(inputPath, outputPath, logger = Logger) {
+    return new Promise(resolve => {
+        const proc = spawn(ffmpegPath, [
+            '-hide_banner', '-loglevel', 'error', '-nostats', '-y',
+            '-i', inputPath,
+            '-vf', 'crop=min(iw\\,ih):min(iw\\,ih),scale=600:600:flags=lanczos',
+            '-q:v', '2',
+            outputPath
+        ], { windowsHide: true });
+        const timer = setTimeout(() => proc.kill('SIGKILL'), 10000);
+        proc.on('close', code => {
+            clearTimeout(timer);
+            if (code === 0 && fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
+                resolve(true);
+            } else {
+                resolve(false);
+            }
+        });
+        proc.on('error', () => {
+            clearTimeout(timer);
+            resolve(false);
+        });
+    });
 }
 
 function spotifyLinkDetails(urlString) {
@@ -2374,7 +2520,9 @@ async function getYoutubePlaylistData(url, signal, cookiePathOverride = null) {
                     return {
                         title: safeMetadataText(parts[2], 'Unknown Track'),
                         artist: safeMetadataText(parts[3], 'Unknown Artist'),
-                        thumbnail: `https://i.ytimg.com/vi/${id}/mqdefault.jpg`,
+                        thumbnail: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+                        playlistCover: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+                        videoId: id,
                         url: `https://www.youtube.com/watch?v=${id}`
                     };
                 }).filter(Boolean);
@@ -2479,6 +2627,8 @@ async function getSpotifyData(url, signal) {
                     album: safeMetadataText(albumName, ''),
                     releaseYear: Number.isSafeInteger(releaseYear) ? releaseYear : null,
                     thumbnail: coverImage,
+                    playlistCover: coverImage,
+                    uri: `spotify:track:${id}`,
                     durationMs: getSpotifyDurationMs(entity)
                 });
             } else {
@@ -2499,12 +2649,18 @@ async function getSpotifyData(url, signal) {
                         const albumName = trackData.album?.name || (type === 'album' ? collectionName : '');
                         const releaseDate = trackData.album?.release_date || '';
                         const releaseYear = releaseDate ? Number(String(releaseDate).slice(0, 4)) : null;
+
+                        const trackThumb = parseCoverUrl(trackData.coverArt?.sources?.[0]?.url || trackData.thumbnail || trackData.images?.[0]?.url)?.href || coverImage;
+                        const trackUri = trackData.uri || (trackData.id ? `spotify:track:${trackData.id}` : null);
+
                         tracks.push({
                             title,
                             artist: trackArtists,
                             album: safeMetadataText(albumName, ''),
                             releaseYear: Number.isSafeInteger(releaseYear) ? releaseYear : null,
-                            thumbnail: coverImage,
+                            thumbnail: trackThumb,
+                            playlistCover: coverImage,
+                            uri: trackUri,
                             durationMs: getSpotifyDurationMs(trackData)
                         });
                     });
@@ -2880,10 +3036,20 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
                     maxContentLength: MAX_COVER_BYTES,
                     signal
                 });
-                if (imgRes.status === 200 && String(imgRes.headers['content-type'] || '').toLowerCase().startsWith('image/jpeg')) {
-                    tempImgPath = path.join(WORK_DIR, `cover_${randomUUID()}.img`);
-                    fs.writeFileSync(tempImgPath, Buffer.from(imgRes.data));
-                    tempFiles.push(tempImgPath);
+                if (imgRes.status === 200 && imgRes.data && imgRes.data.length > 500) {
+                    const tempRawPath = path.join(WORK_DIR, `cover_raw_${randomUUID()}.img`);
+                    fs.writeFileSync(tempRawPath, Buffer.from(imgRes.data));
+                    tempFiles.push(tempRawPath);
+
+                    const isYouTube = safeThumbnail.hostname.includes('ytimg.com');
+                    if (isYouTube) {
+                        const tempSquarePath = path.join(WORK_DIR, `cover_sq_${randomUUID()}.img`);
+                        tempFiles.push(tempSquarePath);
+                        const ok = await cropToSquareJpeg(tempRawPath, tempSquarePath, logger);
+                        tempImgPath = ok ? tempSquarePath : tempRawPath;
+                    } else {
+                        tempImgPath = tempRawPath;
+                    }
                 }
             } catch (imgErr) {
                 logger.warn(`Cover art fetch omitted: ${imgErr.message}`);
@@ -2946,35 +3112,60 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal, report =
         let tempAudioPath;
         let note = null;
         let tempImgPath = '';
-        const safeThumbnail = parseCoverUrl(track.thumbnail);
+        let coverSource = 'none';
 
-        const coverPromise = safeThumbnail
-            ? axios.get(safeThumbnail.href, {
-                responseType: 'arraybuffer',
-                headers: { 'User-Agent': 'Mozilla/5.0' },
-                timeout: 6000,
-                maxRedirects: 0,
-                maxContentLength: MAX_COVER_BYTES,
-                signal
-            })
-                .then(imgRes => {
-                    if (imgRes.status === 200 && String(imgRes.headers['content-type'] || '').toLowerCase().startsWith('image/jpeg')) {
-                        tempImgPath = path.join(WORK_DIR, `cover_zip_${randomUUID()}.img`);
-                        fs.writeFileSync(tempImgPath, Buffer.from(imgRes.data));
-                        tempFiles.push(tempImgPath);
-                    }
-                }).catch(() => { })
-            : Promise.resolve();
+        // Start Spotify track art fetch concurrently if this is a Spotify track with URI
+        const spotifyCoverPromise = (async () => {
+            if (track.uri) {
+                const coverUrl = await fetchSpotifyTrackCoverUrl(track.uri, signal, trackLogger);
+                if (coverUrl) {
+                    const buf = await fetchCoverBuffer(coverUrl, signal);
+                    if (buf) return { buffer: buf, source: 'spotify', isSquare: true };
+                }
+            }
+            return null;
+        })();
 
         if (track.url) {
             if (!isSafeUrl(track.url)) throw new Error('Invalid playlist track URL.');
             report(index, { state: 'downloading', progress: 0 });
+            const matchedVideoId = track.videoId || extractSingleVideoId(new URL(track.url));
+
+            const ytCoverPromise = (async () => {
+                if (matchedVideoId) {
+                    const res = await fetchYouTubeThumbnailBuffer(matchedVideoId, signal);
+                    if (res) return { buffer: res.buffer, source: 'youtube', isSquare: false };
+                }
+                return null;
+            })();
+
             try {
                 const downloadPromise = downloadToTemp(track.url, audioFormat === 'm4a' ? 'm4a' : 'webm', signal, audioFormat,
                     fraction => report(index, { state: 'downloading', progress: fraction }), trackLogger);
-                const [downloadResult] = await Promise.all([downloadPromise, coverPromise]);
-                tempAudioPath = downloadResult;
+                const [dlPath, ytCover] = await Promise.all([downloadPromise, ytCoverPromise]);
+                tempAudioPath = dlPath;
                 tempFiles.push(tempAudioPath);
+
+                let coverInfo = ytCover;
+                if (!coverInfo && track.playlistCover) {
+                    const buf = await fetchCoverBuffer(track.playlistCover, signal);
+                    if (buf) coverInfo = { buffer: buf, source: 'playlist', isSquare: false };
+                }
+                if (coverInfo) {
+                    coverSource = coverInfo.source;
+                    const tempRawPath = path.join(WORK_DIR, `cover_raw_${randomUUID()}.img`);
+                    fs.writeFileSync(tempRawPath, coverInfo.buffer);
+                    tempFiles.push(tempRawPath);
+
+                    if (!coverInfo.isSquare) {
+                        const tempSquarePath = path.join(WORK_DIR, `cover_sq_${randomUUID()}.img`);
+                        tempFiles.push(tempSquarePath);
+                        const ok = await cropToSquareJpeg(tempRawPath, tempSquarePath, trackLogger);
+                        tempImgPath = ok ? tempSquarePath : tempRawPath;
+                    } else {
+                        tempImgPath = tempRawPath;
+                    }
+                }
             } catch (err) {
                 if (err?.code === 'AGE_RESTRICTED' && ageConfirmed && ageGateCookiePool.isEnabled()) {
                     trackLogger.info('Track is age-restricted and age is confirmed, acquiring age-gate cookie account');
@@ -3008,14 +3199,53 @@ async function downloadPlaylistTrack(track, index, audioFormat, signal, report =
                 },
                 ageConfirmed
             });
-            const [downloadResult] = await Promise.all([downloadPromise, coverPromise]);
+            const [downloadResult, spCover] = await Promise.all([downloadPromise, spotifyCoverPromise]);
             tempAudioPath = downloadResult.tempAudioPath;
             tempFiles.push(tempAudioPath);
             if (downloadResult.alternateUsed) {
                 note = 'alternate version used';
                 report(index, { note });
             }
+
+            // Fallback chain for Spotify track:
+            // 1. Spotify track art
+            let coverInfo = spCover;
+
+            // 2. Matched YouTube thumb
+            if (!coverInfo && downloadResult.candidate?.videoId) {
+                const ytThumb = await fetchYouTubeThumbnailBuffer(downloadResult.candidate.videoId, signal);
+                if (ytThumb) {
+                    coverInfo = { buffer: ytThumb.buffer, source: 'youtube', isSquare: false };
+                }
+            }
+
+            // 3. Playlist cover
+            if (!coverInfo && (track.thumbnail || track.playlistCover)) {
+                const coverUrl = track.playlistCover || track.thumbnail;
+                const buf = await fetchCoverBuffer(coverUrl, signal);
+                if (buf) {
+                    coverInfo = { buffer: buf, source: 'playlist', isSquare: true };
+                }
+            }
+
+            if (coverInfo) {
+                coverSource = coverInfo.source;
+                const tempRawPath = path.join(WORK_DIR, `cover_raw_${randomUUID()}.img`);
+                fs.writeFileSync(tempRawPath, coverInfo.buffer);
+                tempFiles.push(tempRawPath);
+
+                if (!coverInfo.isSquare) {
+                    const tempSquarePath = path.join(WORK_DIR, `cover_sq_${randomUUID()}.img`);
+                    tempFiles.push(tempSquarePath);
+                    const ok = await cropToSquareJpeg(tempRawPath, tempSquarePath, trackLogger);
+                    tempImgPath = ok ? tempSquarePath : tempRawPath;
+                } else {
+                    tempImgPath = tempRawPath;
+                }
+            }
         }
+
+        trackLogger.info(`Cover art applied: [${coverSource}] for "${sanitizeAsciiHeader(title)}"`);
 
         return { track, index, title, artist, tempAudioPath, tempImgPath, note };
     } catch (err) {
@@ -3252,7 +3482,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                 zipTimer.end('ok');
 
                 endJob(jobId, 'finished');
-                taskLogger.success(`Archive completed: ${zipName}`);
+                taskLogger.success(`Archive completed: ${zipBase}`);
             } catch (jobErr) {
                 const appErr = classifyError(jobErr, jobErr?.stderr || '');
                 if (job?.status === 'running') endJob(jobId, signal.aborted ? 'cancelled' : 'failed', appErr);
@@ -3613,6 +3843,12 @@ module.exports = {
     findSpotifyCandidates,
     downloadSpotifyAudioWithFallback,
     AgeGateCookiePool,
-    ageGateCookiePool,
-    buildContentDisposition
+    buildContentDisposition,
+    SpotifyCoverCache,
+    spotifyCoverCache,
+    fetchSpotifyTrackCoverUrl,
+    fetchYouTubeThumbnailBuffer,
+    fetchCoverBuffer,
+    cropToSquareJpeg,
+    parseCoverUrl
 };
