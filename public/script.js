@@ -356,6 +356,15 @@ function extractSingleVideoId(parsed) {
     return /^[A-Za-z0-9_-]{11}$/.test(id || '') ? id : null;
 }
 
+function isRealYouTubePlaylistId(list) {
+    if (!list || typeof list !== 'string') return false;
+    const trimmed = list.trim();
+    const upper = trimmed.toUpperCase();
+    if (upper.startsWith('RD') || upper.startsWith('UL')) return false;
+    // Real playlists on YouTube: PL (curated), OLAK5uy_ (YT Music album), UU (channel uploads), FL (favorites), LP
+    return /^(?:PL|OLAK5uy_|UU|FL|LP)[A-Za-z0-9_-]{8,}$/i.test(trimmed);
+}
+
 function detectYouTubePlaylistContext(raw) {
     let value = (raw || '').trim();
     if (!value) return null;
@@ -382,25 +391,13 @@ function detectYouTubePlaylistContext(raw) {
     const list = parsed.searchParams.get('list');
     const startRadio = parsed.searchParams.get('start_radio') === '1';
 
-    if (!list) {
+    if (!list || startRadio || !isRealYouTubePlaylistId(list)) {
         return null;
-    }
-
-    const isMix = list.toUpperCase().startsWith('RD') || list.toUpperCase().startsWith('UL') || startRadio;
-    if (isMix) {
-        return {
-            playlistId: null,
-            isMix: true,
-            singleTrackUrl: `https://${parsed.hostname}/watch?v=${videoId}`,
-            playlistUrl: null,
-            host: parsed.hostname
-        };
     }
 
     const playlistHost = parsed.hostname === 'youtu.be' ? 'www.youtube.com' : parsed.hostname;
     return {
         playlistId: list,
-        isMix: false,
         singleTrackUrl: parsed.hostname === 'youtu.be'
             ? `https://youtu.be/${videoId}`
             : `https://${parsed.hostname}/watch?v=${videoId}`,
@@ -1450,37 +1447,24 @@ function showOptions() {
 function updatePlaylistCallout() {
     if (!el.playlistCallout) return;
     const ctx = state.playlistContext;
-    if (!ctx) {
+    if (!ctx || !ctx.playlistId) {
         el.playlistCallout.hidden = true;
         return;
     }
 
-    if (ctx.isMix) {
-        el.playlistCallout.hidden = false;
-        el.playlistCalloutText.textContent = 'Part of a YouTube Mix. Only this song will be downloaded.';
+    el.playlistCallout.hidden = false;
+    el.playlistToggleBtn.hidden = false;
+
+    if (state.mode === 'playlist') {
+        el.playlistCalloutText.textContent = 'Viewing full playlist.';
+        el.playlistCalloutCap.hidden = false;
+        el.playlistCalloutCap.textContent = 'Playlists are capped at up to 30 tracks.';
+        el.playlistToggleBtn.textContent = 'Just this track';
+    } else {
+        el.playlistCalloutText.textContent = 'This track is part of a playlist.';
         el.playlistCalloutCap.hidden = true;
-        el.playlistToggleBtn.hidden = true;
-        return;
+        el.playlistToggleBtn.textContent = 'Use the whole playlist';
     }
-
-    if (ctx.playlistId) {
-        el.playlistCallout.hidden = false;
-        el.playlistToggleBtn.hidden = false;
-
-        if (state.mode === 'playlist') {
-            el.playlistCalloutText.textContent = 'Viewing full playlist.';
-            el.playlistCalloutCap.hidden = false;
-            el.playlistCalloutCap.textContent = 'Playlists are capped at up to 30 tracks.';
-            el.playlistToggleBtn.textContent = 'Just this track';
-        } else {
-            el.playlistCalloutText.textContent = 'This track is part of a playlist.';
-            el.playlistCalloutCap.hidden = true;
-            el.playlistToggleBtn.textContent = 'Use the whole playlist';
-        }
-        return;
-    }
-
-    el.playlistCallout.hidden = true;
 }
 
 let mediaSwitchController = null;
