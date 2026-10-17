@@ -276,9 +276,10 @@
                     <h2 class="t-title" id="done-title" tabindex="-1">All done. Enjoy!</h2>
                     <p class="supporting" id="done-sub">Your file should be in your downloads.</p>
                     <div class="done-skipped" id="done-skipped" hidden>
-                        <button class="btn btn--text btn--sm" id="done-skipped-toggle" type="button" aria-expanded="false">
-                            <span class="icon" aria-hidden="true">info</span>
-                            <span id="done-skipped-toggle-text">3 skipped (click to see why)</span>
+                        <button class="done-skipped__toggle" id="done-skipped-toggle" type="button" aria-expanded="false" aria-controls="done-skipped-panel">
+                            <span class="icon fill" aria-hidden="true">info</span>
+                            <span class="done-skipped__text" id="done-skipped-toggle-text">3 tracks could not be downloaded (click to see why)</span>
+                            <span class="done-skipped__caret icon" aria-hidden="true">arrow_forward</span>
                         </button>
                         <div class="done-skipped__panel" id="done-skipped-panel" hidden>
                             <ul class="done-skipped__list" id="done-skipped-list"></ul>

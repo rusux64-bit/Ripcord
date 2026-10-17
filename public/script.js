@@ -1631,6 +1631,17 @@ function startDownload(ageConfirmed = false) {
                 logClientEvent('api', `Server note: ${noteHeader}`);
             }
             logClientEvent('api', 'Download completed successfully', { status: xhr.status, size: state.blob.size, name: state.blobName });
+
+            if (isCollection && state.jobId) {
+                try {
+                    const finalRes = await fetch(`/api/progress/${encodeURIComponent(state.jobId)}`, { cache: 'no-store' });
+                    if (finalRes.ok) {
+                        const finalJob = await finalRes.json();
+                        applyJob(finalJob);
+                    }
+                } catch { /* proceed with last known state */ }
+            }
+
             saveBlob();
             finish(isCollection);
         } else {
@@ -1822,15 +1833,22 @@ function applyJob(job) {
     if (tracks.length !== state.rows.length) renderTrackList(tracks);
     tracks.forEach((track, i) => updateTrackRow(state.rows[i], track));
 
-    const total = tracks.length;
-    const processed = tracks.filter(t => t.state === 'done' || t.state === 'failed').length;
-    const failed = tracks.filter(t => t.state === 'failed').length;
-    const overall = tracks.reduce((sum, t) => sum + trackFraction(t), 0) / total;
+    const summary = job.summary || {
+        total: tracks.length,
+        ok: tracks.filter(t => t.state === 'done').length,
+        failed: tracks.filter(t => t.state === 'failed')
+    };
+
+    const total = summary.total || tracks.length;
+    const failedCount = Array.isArray(summary.failed) ? summary.failed.length : tracks.filter(t => t.state === 'failed').length;
+    const okCount = tracks.filter(t => t.state === 'done').length;
+    const processed = Math.min(total, okCount + failedCount);
+    const overall = tracks.reduce((sum, t) => sum + trackFraction(t), 0) / (total || 1);
 
     const current = Math.min(total, processed + 1);
     const phase = processed >= total ? 'Zipping up' : `Downloading ${current} of ${total}`;
     const pct = setProgress(overall, phase);
-    el.metaLeft.textContent = `${phase} · ${pct}%${failed ? ` · ${failed} skipped` : ''}`;
+    el.metaLeft.textContent = `${phase} · ${pct}%${failedCount ? ` · ${failedCount} skipped` : ''}`;
 
     const active = tracks.findIndex(t => t.state === 'matching' || t.state === 'downloading' || t.state === 'encoding');
     if (active !== -1 && active !== state.activeRow) {
@@ -1888,20 +1906,40 @@ function fail(err) {
     showErrorBanner('options', err, () => startDownload(false), () => startDownload(true));
 }
 
+function updateSkippedToggleLabel(failedCount, isExpanded) {
+    const count = Number.isSafeInteger(failedCount) && failedCount > 0 ? failedCount : 1;
+    const noun = count === 1 ? '1 track' : `${count} tracks`;
+    const action = isExpanded ? '(click to hide)' : '(click to see why)';
+    el.doneSkippedToggleText.textContent = `${noun} could not be downloaded ${action}`;
+}
+
 function finish(isCollection) {
     state.xhr = null;
-    if (isCollection && state.lastJob && Array.isArray(state.lastJob.tracks)) {
-        const tracks = state.lastJob.tracks;
-        const failedTracks = tracks.filter(t => t.state === 'failed');
-        const okCount = tracks.filter(t => t.state === 'done').length;
+    if (isCollection && state.lastJob) {
+        const summary = state.lastJob.summary || {
+            total: (state.lastJob.tracks || []).length,
+            ok: (state.lastJob.tracks || []).filter(t => t.state === 'done').length,
+            failed: (state.lastJob.tracks || []).filter(t => t.state !== 'done').map((t, i) => ({
+                index: i,
+                title: t.title,
+                artist: t.artist,
+                code: t.code,
+                error: t.error
+            }))
+        };
+        const total = summary.total;
+        const failedTracks = Array.isArray(summary.failed) ? summary.failed : [];
+        const failedCount = failedTracks.length;
+        // Invariant: ready + skipped === total
+        const readyCount = Math.max(0, total - failedCount);
 
-        if (failedTracks.length > 0) {
-            el.doneTitle.textContent = `${okCount} of ${tracks.length} ready, ${failedTracks.length} skipped`;
+        if (failedCount > 0) {
+            el.doneTitle.textContent = `${readyCount} of ${total} ready, ${failedCount} skipped`;
             el.doneSub.textContent = 'Your ZIP should be in your downloads folder.';
             el.doneSkipped.hidden = false;
             el.doneSkippedPanel.hidden = true;
             el.doneSkippedToggle.setAttribute('aria-expanded', 'false');
-            el.doneSkippedToggleText.textContent = `${failedTracks.length} skipped (click to see why)`;
+            updateSkippedToggleLabel(failedCount, false);
             el.doneSkippedList.replaceChildren();
 
             failedTracks.forEach(t => {
@@ -1947,9 +1985,12 @@ function celebrate() {
 
 el.doneSkippedToggle.addEventListener('click', () => {
     const isHidden = el.doneSkippedPanel.hidden;
-    el.doneSkippedPanel.hidden = !isHidden;
-    el.doneSkippedToggle.setAttribute('aria-expanded', String(isHidden));
-    logClientEvent('action', isHidden ? 'Expanded skipped tracks' : 'Collapsed skipped tracks');
+    const willOpen = isHidden;
+    el.doneSkippedPanel.hidden = !willOpen;
+    el.doneSkippedToggle.setAttribute('aria-expanded', String(willOpen));
+    const failedCount = (state.lastJob?.summary?.failed || []).length || (state.lastJob?.tracks || []).filter(t => t.state === 'failed').length || 1;
+    updateSkippedToggleLabel(failedCount, willOpen);
+    logClientEvent('action', willOpen ? 'Expanded skipped tracks' : 'Collapsed skipped tracks');
 });
 
 el.downloadBtn.addEventListener('click', () => {
@@ -1994,6 +2035,8 @@ syncThemeColorMeta();
 initColourEngine();
 
 window.resolveDownloadName = resolveDownloadName;
+window.state = state;
+window.finish = finish;
 
 setTimeout(() => {
     delete root.dataset.intro;

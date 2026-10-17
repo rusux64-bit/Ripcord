@@ -1093,6 +1093,44 @@ const JOB_ID_PATTERN = /^[A-Za-z0-9-]{16,64}$/;
 const MAX_TRACKED_JOBS = 200;
 const downloadJobs = new Map();
 
+function computeJobSummary(job) {
+    if (!job || !Array.isArray(job.tracks)) return { total: 0, ok: 0, failed: [] };
+    const total = job.tracks.length;
+    const failed = [];
+    let ok = 0;
+
+    job.tracks.forEach((t, i) => {
+        if (t.state === 'done') {
+            ok++;
+        } else if (t.state === 'failed') {
+            failed.push({
+                index: i,
+                title: t.title || 'Unknown Track',
+                artist: t.artist || '',
+                code: t.code || 'UNKNOWN',
+                error: t.error || 'Track could not be downloaded.'
+            });
+        }
+    });
+
+    if (job.status && job.status !== 'running') {
+        job.tracks.forEach((t, i) => {
+            if (t.state !== 'done' && t.state !== 'failed') {
+                failed.push({
+                    index: i,
+                    title: t.title || 'Unknown Track',
+                    artist: t.artist || '',
+                    code: t.code || 'UNKNOWN',
+                    error: t.error || 'Track could not be processed.'
+                });
+            }
+        });
+        ok = Math.max(0, total - failed.length);
+    }
+
+    return { total, ok, failed };
+}
+
 function createJob(jobId, tracks) {
     if (!jobId) return null;
     if (downloadJobs.size >= MAX_TRACKED_JOBS) downloadJobs.delete(downloadJobs.keys().next().value);
@@ -1109,6 +1147,7 @@ function createJob(jobId, tracks) {
             error: null
         }))
     };
+    job.summary = computeJobSummary(job);
     downloadJobs.set(jobId, job);
     return job;
 }
@@ -1129,6 +1168,7 @@ function endJob(jobId, status, errorInfo = null) {
             job.code = errorInfo.code || null;
         }
     }
+    job.summary = computeJobSummary(job);
     setTimeout(() => { if (downloadJobs.get(jobId) === job) downloadJobs.delete(jobId); }, 2 * 60 * 1000).unref();
 }
 
@@ -1136,7 +1176,8 @@ function endJob(jobId, status, errorInfo = null) {
 app.get('/api/progress/:id', createRateLimiter(Math.max(API_RATE_LIMIT_MAX * 20, 2000), 'Too many progress requests.'), rejectCrossSiteRequests, (req, res) => {
     const job = JOB_ID_PATTERN.test(req.params.id) ? downloadJobs.get(req.params.id) : null;
     if (!job) return res.status(404).json({ status: 'pending' });
-    res.json(job);
+    const summary = job.summary || computeJobSummary(job);
+    res.json({ ...job, summary });
 });
 
 app.use('/api', createRateLimiter(API_RATE_LIMIT_MAX, 'Too many requests. Please wait before trying again.'));
@@ -3850,5 +3891,6 @@ module.exports = {
     fetchYouTubeThumbnailBuffer,
     fetchCoverBuffer,
     cropToSquareJpeg,
-    parseCoverUrl
+    parseCoverUrl,
+    computeJobSummary
 };
