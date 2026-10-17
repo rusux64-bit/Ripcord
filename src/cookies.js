@@ -9,7 +9,10 @@ const {
     YTDLP_AGE_COOKIES_DIR,
     COOKIE_BUDGET_CACHE_FILE,
     COOKIE_GUARD_SECRET_FILE,
-    COOKIE_GUARD_SOURCE_CACHE_MAX_BYTES
+    COOKIE_GUARD_SOURCE_CACHE_MAX_BYTES,
+    COOKIE_GUARD_PER_ACCOUNT_HOURLY,
+    COOKIE_GUARD_PER_ACCOUNT_DAILY,
+    COOKIE_GUARD_GLOBAL_HOURLY
 } = require('./config');
 const { Logger } = require('./logger');
 
@@ -17,7 +20,7 @@ class AgeGateCookiePool {
     constructor({
         enabled = false,
         dirPath = '',
-        hourlyLimit = 30,
+        hourlyLimit = COOKIE_GUARD_PER_ACCOUNT_HOURLY,
         logger = Logger
     } = {}) {
         this.enabled = enabled;
@@ -264,9 +267,9 @@ class CookieGuard {
         secretFile = COOKIE_GUARD_SECRET_FILE,
         workDir = WORK_DIR,
         logger = Logger,
-        perAccountHourlyLimit = 20,
-        perAccountDailyLimit = 100,
-        globalHourlyLimit = 40,
+        perAccountHourlyLimit = COOKIE_GUARD_PER_ACCOUNT_HOURLY,
+        perAccountDailyLimit = COOKIE_GUARD_PER_ACCOUNT_DAILY,
+        globalHourlyLimit = COOKIE_GUARD_GLOBAL_HOURLY,
         perIpHourlyLimit = 3,
         perIpDailyLimit = 8,
         perIpDistinctIdsLimit = 5,
