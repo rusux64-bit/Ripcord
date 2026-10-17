@@ -100,6 +100,7 @@ const aria2cAvailable = checkAria2c.status === 0;
 const YTDLP_AUTHED_CLIENTS = (process.env.YTDLP_AUTHED_CLIENTS || 'web_embedded,web').trim();
 const AGE_GATE_COOKIES_ENABLED = ['1', 'true', 'on', 'yes'].includes(String(process.env.AGE_GATE_COOKIES || 'off').toLowerCase().trim());
 const YTDLP_AGE_COOKIES_DIR = process.env.YTDLP_AGE_COOKIES_DIR || '';
+const COOKIE_BUDGET_CACHE_FILE = process.env.COOKIE_BUDGET_CACHE_FILE || path.resolve(path.join(__dirname, '..', 'cache', 'cookie_budgets.json'));
 
 const JOB_ID_PATTERN = /^[A-Za-z0-9_-]{8,32}$/;
 
@@ -140,5 +141,6 @@ module.exports = {
     YTDLP_AUTHED_CLIENTS,
     AGE_GATE_COOKIES_ENABLED,
     YTDLP_AGE_COOKIES_DIR,
+    COOKIE_BUDGET_CACHE_FILE,
     JOB_ID_PATTERN
 };

@@ -202,6 +202,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                 onProgress: undefined,
                 logger: taskLogger,
                 jobExcludedVideoIds,
+                clientIp: req?.ip || req?.socket?.remoteAddress || '127.0.0.1',
                 onNote: (note) => {
                     res.setHeader('X-Ripcord-Note', note);
                 }
@@ -344,7 +345,8 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                         const item = await searchHandoffQueue.shift();
                         if (!item) return;
                         const { track, index } = item;
-                        const downloaded = await downloadPlaylistTrack(track, index, audioBitrate, audioFormat, signal, report, taskLogger, jobExcludedVideoIds);
+                        const clientIp = req?.ip || req?.socket?.remoteAddress || '127.0.0.1';
+                        const downloaded = await downloadPlaylistTrack(track, index, audioBitrate, audioFormat, signal, report, taskLogger, jobExcludedVideoIds, clientIp);
                         if (!downloaded) continue;
                         try {
                             await encodeHandoffQueue.push(downloaded);

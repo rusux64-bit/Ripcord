@@ -55,6 +55,8 @@ module.exports = {
     // Cookies
     AgeGateCookiePool: cookies.AgeGateCookiePool,
     ageGateCookiePool: cookies.ageGateCookiePool,
+    CookieGuard: cookies.CookieGuard,
+    cookieGuard: cookies.cookieGuard,
 
     // Media & Tagging
     downloadMetaMap: media.downloadMetaMap,

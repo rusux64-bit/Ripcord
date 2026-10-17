@@ -44,3 +44,4 @@ skills-lock.json
 .claude/
 __pycache__/
 *.pyc
+scratch/

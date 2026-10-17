@@ -20,7 +20,7 @@ const {
 const { Logger, startStage, safeMetadataText, sanitizeAsciiHeader } = require('./logger');
 const { AppError, classifyError } = require('./errors');
 const { ytdlpSemaphore } = require('./queue');
-const { ageGateCookiePool } = require('./cookies');
+const { cookieGuard, ageRestrictedCache, AgeGateLruCache } = require('./cookies');
 const {
     downloadMetaMap,
     sanitizeFilename,
@@ -697,44 +697,6 @@ async function searchYouTubeCandidates(query, maxCandidates, signal, logger = Lo
     });
 }
 
-// In-memory 24h LRU cache of age-restricted video IDs across jobs
-class AgeGateLruCache {
-    constructor(maxSize = 1000, ttlMs = 24 * 60 * 60 * 1000) {
-        this.maxSize = maxSize;
-        this.ttlMs = ttlMs;
-        this.cache = new Map(); // videoId -> timestamp
-    }
-
-    has(videoId) {
-        if (!videoId || !this.cache.has(videoId)) return false;
-        const entryTime = this.cache.get(videoId);
-        if (Date.now() - entryTime > this.ttlMs) {
-            this.cache.delete(videoId);
-            return false;
-        }
-        // Refresh position in Map for LRU order
-        this.cache.delete(videoId);
-        this.cache.set(videoId, entryTime);
-        return true;
-    }
-
-    add(videoId) {
-        if (!videoId) return;
-        if (this.cache.has(videoId)) {
-            this.cache.delete(videoId);
-        } else if (this.cache.size >= this.maxSize) {
-            const oldestKey = this.cache.keys().next().value;
-            if (oldestKey) this.cache.delete(oldestKey);
-        }
-        this.cache.set(videoId, Date.now());
-    }
-
-    clear() {
-        this.cache.clear();
-    }
-}
-
-const ageRestrictedCache = new AgeGateLruCache(1000, 24 * 60 * 60 * 1000);
 
 async function findSpotifyCandidates(track, signal, logger = Logger, excludedVideoIds = new Set()) {
     const MATCH_THRESHOLD = 0.58;       // Minimum confidence score required
@@ -1054,7 +1016,8 @@ async function downloadSpotifyAudioWithFallback({
     logger = Logger,
     jobExcludedVideoIds = new Set(),
     onNote = null,
-    candidatesOverride = null
+    candidatesOverride = null,
+    clientIp = '127.0.0.1'
 }) {
     const spotifyTrackId = track?.id || track?.uri || '';
     let candidates = candidatesOverride;
@@ -1142,28 +1105,39 @@ async function downloadSpotifyAudioWithFallback({
 
     if (lastError?.code === 'AGE_RESTRICTED') {
         const topCandidate = candidates[0];
-        if (ageGateCookiePool.isEnabled()) {
-            logger.info(`Spotify age-gate fallback: all non-cookie attempts failed; retrying top candidate [${topCandidate.videoId}] with age-gate cookie account`);
-            const lease = await ageGateCookiePool.acquire();
-            if (lease) {
-                try {
-                    const candidateUrl = `https://www.youtube.com/watch?v=${topCandidate.videoId}`;
-                    const tempAudioPath = await downloadToTemp(
-                        candidateUrl,
-                        audioFormat === 'm4a' ? 'm4a' : 'webm',
-                        signal,
-                        audioFormat,
-                        onProgress,
-                        logger,
-                        lease.cookiePath
-                    );
-                    lease.release(true);
-                    return { tempAudioPath, candidate: topCandidate, alternateUsed: false };
-                } catch (cookieErr) {
-                    lease.release(false, cookieErr);
-                    throw cookieErr;
+        if (cookieGuard.isEnabled()) {
+            logger.info(`Spotify age-gate fallback: all non-cookie attempts failed; retrying top candidate [${topCandidate.videoId}] with cookie guard`);
+            const guardResult = await cookieGuard.acquire({
+                ip: clientIp,
+                videoId: topCandidate.videoId,
+                kind: 'spotify',
+                signal,
+                logger
+            });
+            if (guardResult.status === 'allow') {
+                if (guardResult.fromCache && guardResult.tempAudioPath) {
+                    return { tempAudioPath: guardResult.tempAudioPath, candidate: topCandidate, alternateUsed: false };
+                } else if (guardResult.lease) {
+                    try {
+                        const candidateUrl = `https://www.youtube.com/watch?v=${topCandidate.videoId}`;
+                        const tempAudioPath = await downloadToTemp(
+                            candidateUrl,
+                            audioFormat === 'm4a' ? 'm4a' : 'webm',
+                            signal,
+                            audioFormat,
+                            onProgress,
+                            logger,
+                            guardResult.lease.cookiePath
+                        );
+                        guardResult.release(true, null, tempAudioPath);
+                        return { tempAudioPath, candidate: topCandidate, alternateUsed: false };
+                    } catch (cookieErr) {
+                        guardResult.release(false, cookieErr);
+                        throw cookieErr;
+                    }
                 }
             }
+            throw lastError || new AppError('AGE_RESTRICTED');
         } else if (COOKIES_PATH) {
             logger.info(`Spotify age-gate fallback: all non-cookie attempts failed; retrying top candidate [${topCandidate.videoId}] with fallback cookies`);
             const candidateUrl = `https://www.youtube.com/watch?v=${topCandidate.videoId}`;
@@ -1183,7 +1157,7 @@ async function downloadSpotifyAudioWithFallback({
     throw lastError || new AppError('AGE_RESTRICTED');
 }
 
-async function downloadPlaylistTrack(track, index, audioBitrate, audioFormat, signal, report = () => { }, logger = Logger, jobExcludedVideoIds = new Set()) {
+async function downloadPlaylistTrack(track, index, audioBitrate, audioFormat, signal, report = () => { }, logger = Logger, jobExcludedVideoIds = new Set(), clientIp = '127.0.0.1') {
     const trackLogger = logger.child({ trackIndex: index });
     const tempFiles = [];
 
@@ -1252,18 +1226,31 @@ async function downloadPlaylistTrack(track, index, audioBitrate, audioFormat, si
                 }
             } catch (err) {
                 if (err?.code === 'AGE_RESTRICTED') {
-                    if (ageGateCookiePool.isEnabled()) {
-                        trackLogger.info('Track is age-restricted, acquiring age-gate cookie account for automatic retry');
-                        const lease = await ageGateCookiePool.acquire();
-                        if (!lease) throw err;
-                        try {
-                            tempAudioPath = await downloadToTemp(track.url, audioFormat === 'm4a' ? 'm4a' : 'webm', signal, audioFormat,
-                                fraction => report(index, { state: 'downloading', progress: fraction }), trackLogger, lease.cookiePath);
+                    if (cookieGuard.isEnabled()) {
+                        trackLogger.info(`Track is age-restricted, acquiring cookie guard lease for automatic retry [videoId=${matchedVideoId || 'unknown'}]`);
+                        const guardResult = await cookieGuard.acquire({
+                            ip: clientIp,
+                            videoId: matchedVideoId,
+                            kind: 'collection',
+                            signal,
+                            logger: trackLogger
+                        });
+                        if (guardResult.status !== 'allow') throw err;
+                        if (guardResult.fromCache && guardResult.tempAudioPath) {
+                            tempAudioPath = guardResult.tempAudioPath;
                             tempFiles.push(tempAudioPath);
-                            lease.release(true);
-                        } catch (cookieErr) {
-                            lease.release(false, cookieErr);
-                            throw cookieErr;
+                        } else if (guardResult.lease) {
+                            try {
+                                tempAudioPath = await downloadToTemp(track.url, audioFormat === 'm4a' ? 'm4a' : 'webm', signal, audioFormat,
+                                    fraction => report(index, { state: 'downloading', progress: fraction }), trackLogger, guardResult.lease.cookiePath);
+                                tempFiles.push(tempAudioPath);
+                                guardResult.release(true, null, tempAudioPath);
+                            } catch (cookieErr) {
+                                guardResult.release(false, cookieErr);
+                                throw cookieErr;
+                            }
+                        } else {
+                            throw err;
                         }
                     } else if (COOKIES_PATH) {
                         trackLogger.info('Track is age-restricted, retrying with fallback cookies');
@@ -1287,6 +1274,7 @@ async function downloadPlaylistTrack(track, index, audioBitrate, audioFormat, si
                 logger: trackLogger,
                 jobExcludedVideoIds,
                 candidatesOverride: track.candidates || null,
+                clientIp,
                 onNote: n => {
                     note = n;
                     report(index, { note: n });
@@ -1421,35 +1409,65 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
             tempAudioPath = target;
             tempFiles.push(tempAudioPath);
         } else {
-            logger.info('Downloading validated audio source');
-            try {
-                tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format, undefined, logger);
-                tempFiles.push(tempAudioPath);
-            } catch (err) {
-                if (err?.code === 'AGE_RESTRICTED') {
-                    if (ageGateCookiePool.isEnabled()) {
-                        logger.info('Track is age-restricted, acquiring age-gate cookie account for automatic retry');
-                        const lease = await ageGateCookiePool.acquire();
-                        if (!lease) {
-                            throw new AppError('AGE_RESTRICTED');
-                        }
-                        try {
-                            tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format, undefined, logger, lease.cookiePath);
-                            tempFiles.push(tempAudioPath);
-                            lease.release(true);
-                        } catch (cookieErr) {
-                            lease.release(false, cookieErr);
-                            throw cookieErr;
-                        }
-                    } else if (COOKIES_PATH) {
-                        logger.info('Track is age-restricted, retrying with fallback cookies');
-                        tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format, undefined, logger, COOKIES_PATH);
-                        tempFiles.push(tempAudioPath);
+            const videoId = getYouTubeVideoId(target);
+            const clientIp = _req?.ip || _req?.socket?.remoteAddress || '127.0.0.1';
+            let skipDirect = false;
+
+            if (videoId && ageRestrictedCache.has(videoId)) {
+                logger.info(`Track [${videoId}] is in age-restricted cache; skipping unauthenticated download attempt`);
+                skipDirect = true;
+            }
+
+            if (!skipDirect) {
+                logger.info('Downloading validated audio source');
+                try {
+                    tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format, undefined, logger);
+                    tempFiles.push(tempAudioPath);
+                } catch (err) {
+                    if (err?.code === 'AGE_RESTRICTED') {
+                        if (videoId) ageRestrictedCache.add(videoId);
                     } else {
                         throw err;
                     }
+                }
+            }
+
+            if (!tempAudioPath) {
+                if (cookieGuard.isEnabled()) {
+                    logger.info(`Track is age-restricted, acquiring cookie guard lease for automatic retry [videoId=${videoId || 'unknown'}]`);
+                    const guardResult = await cookieGuard.acquire({
+                        ip: clientIp,
+                        videoId,
+                        kind: 'single',
+                        signal,
+                        logger
+                    });
+
+                    if (guardResult.status !== 'allow') {
+                        throw new AppError('AGE_RESTRICTED');
+                    }
+
+                    if (guardResult.fromCache && guardResult.tempAudioPath) {
+                        tempAudioPath = guardResult.tempAudioPath;
+                        tempFiles.push(tempAudioPath);
+                    } else if (guardResult.lease) {
+                        try {
+                            tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format, undefined, logger, guardResult.lease.cookiePath);
+                            tempFiles.push(tempAudioPath);
+                            guardResult.release(true, null, tempAudioPath);
+                        } catch (cookieErr) {
+                            guardResult.release(false, cookieErr);
+                            throw cookieErr;
+                        }
+                    } else {
+                        throw new AppError('AGE_RESTRICTED');
+                    }
+                } else if (COOKIES_PATH) {
+                    logger.info('Track is age-restricted, retrying with fallback cookies');
+                    tempAudioPath = await downloadToTemp(target, format === 'm4a' ? 'm4a' : 'webm', signal, format, undefined, logger, COOKIES_PATH);
+                    tempFiles.push(tempAudioPath);
                 } else {
-                    throw err;
+                    throw new AppError('AGE_RESTRICTED');
                 }
             }
         }
