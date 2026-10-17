@@ -18,7 +18,16 @@ const {
 
 const { Logger, startStage, safeMetadataText, sanitizeAsciiHeader } = require('./logger');
 const { AppError, classifyError, sendError } = require('./errors');
-const { AsyncBoundedQueue, downloadQueue, metadataSemaphore } = require('./queue');
+const {
+    AsyncBoundedQueue,
+    downloadQueue,
+    metadataSemaphore,
+    MAX_TRACKED_JOBS,
+    downloadJobs,
+    computeJobSummary,
+    createJob,
+    endJob
+} = require('./queue');
 const {
     sanitizeFilename,
     buildContentDisposition,
@@ -71,89 +80,6 @@ function rejectCrossSiteRequests(req, res, next) {
         }
     }
     next();
-}
-
-// per-track progress for collection downloads, keyed by a client-generated job id
-const MAX_TRACKED_JOBS = 200;
-const downloadJobs = new Map();
-
-function computeJobSummary(job) {
-    if (!job || !Array.isArray(job.tracks)) return { total: 0, ok: 0, failed: [] };
-    const total = job.tracks.length;
-    const failed = [];
-    let ok = 0;
-
-    job.tracks.forEach((t, i) => {
-        if (t.state === 'done') {
-            ok++;
-        } else if (t.state === 'failed') {
-            failed.push({
-                index: i,
-                title: t.title || 'Unknown Track',
-                artist: t.artist || '',
-                code: t.code || 'UNKNOWN',
-                error: t.error || 'Track could not be downloaded.'
-            });
-        }
-    });
-
-    if (job.status && job.status !== 'running') {
-        job.tracks.forEach((t, i) => {
-            if (t.state !== 'done' && t.state !== 'failed') {
-                failed.push({
-                    index: i,
-                    title: t.title || 'Unknown Track',
-                    artist: t.artist || '',
-                    code: t.code || 'UNKNOWN',
-                    error: t.error || 'Track could not be processed.'
-                });
-            }
-        });
-        ok = Math.max(0, total - failed.length);
-    }
-
-    return { total, ok, failed };
-}
-
-function createJob(jobId, tracks) {
-    if (!jobId) return null;
-    if (downloadJobs.size >= MAX_TRACKED_JOBS) downloadJobs.delete(downloadJobs.keys().next().value);
-    const job = {
-        status: 'running',
-        error: null,
-        code: null,
-        tracks: tracks.map(track => ({
-            title: String(track.title || 'Unknown Track').slice(0, 200),
-            artist: String(track.artist || '').slice(0, 200),
-            state: 'queued',
-            progress: 0,
-            code: null,
-            error: null
-        }))
-    };
-    job.summary = computeJobSummary(job);
-    downloadJobs.set(jobId, job);
-    return job;
-}
-
-function endJob(jobId, status, errorInfo = null) {
-    const job = jobId && downloadJobs.get(jobId);
-    if (!job) return;
-    job.status = status;
-    if (errorInfo) {
-        if (errorInfo instanceof AppError) {
-            job.error = errorInfo.userMessage;
-            job.code = errorInfo.code;
-        } else if (typeof errorInfo === 'string') {
-            job.error = errorInfo;
-            job.code = errorInfo === 'cancelled' ? 'CANCELLED' : 'INTERNAL';
-        } else if (errorInfo && typeof errorInfo === 'object') {
-            job.error = errorInfo.userMessage || errorInfo.error || errorInfo.message || null;
-            job.code = errorInfo.code || null;
-        }
-    }
-    job.summary = computeJobSummary(job);
-    setTimeout(() => { if (downloadJobs.get(jobId) === job) downloadJobs.delete(jobId); }, 2 * 60 * 1000).unref();
 }
 
 // worker function that processes the actual download request
@@ -265,7 +191,10 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             let addedTracks = 0;
             job = createJob(jobId, tracks);
             const report = (index, patch) => {
-                if (job?.tracks[index]) Object.assign(job.tracks[index], patch);
+                if (job?.tracks[index]) {
+                    Object.assign(job.tracks[index], patch);
+                    job.summary = computeJobSummary(job);
+                }
             };
 
             try {
@@ -460,7 +389,7 @@ function registerRoutes(app) {
     app.get('/api/progress/:id', createRateLimiter(Math.max(API_RATE_LIMIT_MAX * 20, 2000), 'Too many progress requests.'), rejectCrossSiteRequests, (req, res) => {
         const job = JOB_ID_PATTERN.test(req.params.id) ? downloadJobs.get(req.params.id) : null;
         if (!job) return res.status(404).json({ status: 'pending' });
-        const summary = job.summary || computeJobSummary(job);
+        const summary = computeJobSummary(job);
         res.json({ ...job, summary });
     });
 

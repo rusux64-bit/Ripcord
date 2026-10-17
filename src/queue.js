@@ -313,6 +313,7 @@ function endJob(jobId, status, errorInfo = null) {
         }
     }
     job.summary = computeJobSummary(job);
+    setTimeout(() => { if (downloadJobs.get(jobId) === job) downloadJobs.delete(jobId); }, 2 * 60 * 1000).unref();
 }
 
 const downloadQueue = new DownloadQueue();

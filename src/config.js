@@ -108,7 +108,7 @@ const COOKIE_GUARD_PER_ACCOUNT_HOURLY = positiveIntegerEnv('COOKIE_GUARD_PER_ACC
 const COOKIE_GUARD_PER_ACCOUNT_DAILY = positiveIntegerEnv('COOKIE_GUARD_PER_ACCOUNT_DAILY', 30, 500);
 const COOKIE_GUARD_GLOBAL_HOURLY = positiveIntegerEnv('COOKIE_GUARD_GLOBAL_HOURLY', 15, 500);
 
-const JOB_ID_PATTERN = /^[A-Za-z0-9_-]{8,32}$/;
+const JOB_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
 
 module.exports = {
     findExecutableInPath,
