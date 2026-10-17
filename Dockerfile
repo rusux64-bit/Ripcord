@@ -32,6 +32,7 @@ USER node
 EXPOSE 5224
 
 ENV NODE_ENV=production \
-    PORT=5224
+    PORT=5224 \
+    XDG_CACHE_HOME=/tmp/.cache
 
 CMD ["node", "server.js"]

@@ -40,6 +40,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: ${PORT:-5224}
+      XDG_CACHE_HOME: /tmp/.cache
       RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-900000}
       RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
       DOWNLOAD_CONCURRENCY: ${DOWNLOAD_CONCURRENCY:-4}
