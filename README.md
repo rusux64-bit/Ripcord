@@ -161,7 +161,7 @@ docker compose up -d
 ### Local Installation
 
 ```bash
-# Prerequisites: Node.js 20+, FFmpeg, yt-dlp, python3, flac, vorbis-tools
+# Prerequisites: a current Node.js LTS, FFmpeg, yt-dlp, python3, flac, vorbis-tools
 git clone https://github.com/rusux64-bit/Ripcord.git
 cd Ripcord
 

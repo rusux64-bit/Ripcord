@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Fast, clean audio extractor for Spotify and YouTube powered by yt-dlp & FFmpeg",
   "main": "server.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
