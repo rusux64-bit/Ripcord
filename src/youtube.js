@@ -17,7 +17,7 @@ const {
     aria2cAvailable,
     COOKIES_PATH
 } = require('./config');
-const { Logger, startStage } = require('./logger');
+const { Logger, startStage, safeMetadataText } = require('./logger');
 const { AppError, classifyError } = require('./errors');
 const { ytdlpSemaphore } = require('./queue');
 const { ageGateCookiePool } = require('./cookies');
@@ -37,7 +37,6 @@ const {
     fetchYouTubeThumbnailBuffer
 } = require('./media');
 const {
-    safeMetadataText,
     fetchSpotifyTrackCoverUrl,
     spotifyMatchCache,
     normalizeText,

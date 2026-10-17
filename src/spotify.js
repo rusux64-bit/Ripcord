@@ -599,5 +599,6 @@ module.exports = {
     normalizeText,
     normalizeToAlphaNumeric,
     normalizeArtistName,
-    getSpotifyData
+    getSpotifyData,
+    safeMetadataText
 };
