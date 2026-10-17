@@ -108,10 +108,32 @@ class AgeGateCookiePool {
                     this.logger.warn(`Cookie file contains unexpected domain(s): account-${accountIndex}`);
                 }
 
+                // Startup validation 3: YouTube authentication credentials check
+                let hasLoginInfo = false;
+                let hasAuthToken = false;
+                for (const line of lines) {
+                    const trimmed = line.trim();
+                    if (!trimmed || trimmed.startsWith('#')) continue;
+                    const parts = trimmed.split('\t');
+                    if (parts.length >= 7) {
+                        const name = parts[5];
+                        if (name === 'LOGIN_INFO') hasLoginInfo = true;
+                        if (name === 'SAPISID' || name === '__Secure-3PAPISID' || name === '__Secure-1PAPISID' || name === 'SID' || name === '__Secure-3PSID') {
+                            hasAuthToken = true;
+                        }
+                    }
+                }
+
+                if (!hasLoginInfo) {
+                    this.logger.warn(`Cookie file account-${accountIndex} (${entry.name}) is missing required YouTube session cookie 'LOGIN_INFO'. yt-dlp will treat this account as unauthenticated (is_authenticated=false); age-restricted downloads will fail. Please export cookies while logged into YouTube.`);
+                }
+
                 this.accounts.push({
                     id: `account-${accountIndex++}`,
                     filename: entry.name,
                     filePath: fullPath,
+                    hasLoginInfo,
+                    hasAuthToken,
                     active: false,
                     cooldownUntil: 0,
                     failCount: 0,
@@ -126,7 +148,12 @@ class AgeGateCookiePool {
             this.logger.warn('No valid Netscape cookie files found in YTDLP_AGE_COOKIES_DIR.');
             this.enabled = false;
         } else {
-            this.logger.info(`Age-gate cookie pool initialized with ${this.accounts.length} valid account(s)`);
+            const authCount = this.accounts.filter(a => a.hasLoginInfo).length;
+            if (authCount === 0) {
+                this.logger.warn(`Age-gate cookie pool initialized with ${this.accounts.length} account(s), but NONE have 'LOGIN_INFO'. Age-restricted downloads will fail until valid cookies are provided.`);
+            } else {
+                this.logger.info(`Age-gate cookie pool initialized with ${this.accounts.length} account(s) (${authCount} authenticated)`);
+            }
         }
     }
 
@@ -281,7 +308,7 @@ class CookieGuard {
         jitterMaxMs = 40000,
         sourceCacheTtlMs = 15 * 60 * 1000,
         sourceCacheMaxBytes = COOKIE_GUARD_SOURCE_CACHE_MAX_BYTES,
-        failedCookieTtlMs = 60 * 60 * 1000
+        failedCookieTtlMs = 10 * 60 * 1000
     } = {}) {
         this.pool = pool;
         this.budgetFile = budgetFile;
@@ -646,7 +673,7 @@ class CookieGuard {
             const failedAt = this.failedCookieCache.get(videoId);
             if (Date.now() - failedAt < this.failedCookieTtlMs) {
                 this.recordDenial('KNOWN_FAILED_COOKIE');
-                logger.info(`[cookie_guard] Video [${videoId}] failed previously with cookies within 1h; skipping retry [ip=${ipHash}]`);
+                logger.info(`[cookie_guard] Video [${videoId}] failed previously with cookies within ${Math.round(this.failedCookieTtlMs / 60000)}m; skipping retry [ip=${ipHash}]`);
                 return { status: 'deny', reason: 'KNOWN_FAILED_COOKIE' };
             } else {
                 this.failedCookieCache.delete(videoId);

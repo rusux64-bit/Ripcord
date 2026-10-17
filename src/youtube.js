@@ -892,117 +892,136 @@ async function getYoutubePlaylistData(url, signal) {
 // download the raw audio stream to a temp file using yt-dlp
 async function downloadToTemp(targetUrl, extension = 'webm', signal, targetFormat, onProgress, logger = Logger, cookiePathOverride = null) {
     const stageTimer = startStage(logger, 'download');
-    const tempPath = path.join(WORK_DIR, `ripcord_${randomUUID()}.${extension}`);
     await ytdlpSemaphore.acquire(signal);
 
     const ytId = getYouTubeVideoId(targetUrl);
     const canonicalTarget = ytId ? `https://www.youtube.com/watch?v=${ytId}` : targetUrl;
 
     try {
-        return await new Promise((resolve, reject) => {
-            const formatSelector = targetFormat === 'ogg'
-                ? 'bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio/best'
-                : targetFormat === 'm4a'
-                    ? 'bestaudio[acodec^=mp4a]/bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best'
-                    : 'bestaudio/best';
-            const ytdlpArgs = [
-                '--ignore-config',
-                '-f', formatSelector,
-                '--no-playlist',
-                '--no-warnings',
-                '--max-filesize', `${Math.floor(MAX_DOWNLOAD_BYTES / (1024 * 1024))}M`,
-                '--concurrent-fragments', String(YTDLP_CONCURRENT_FRAGMENTS),
-                '--print', 'before_dl:RIPCORD_INFO %(format_id)s'
-            ];
+        const maxAttempts = !cookiePathOverride ? 2 : 1;
+        let lastError = null;
 
-            let chosenClient = 'visionos,android,web';
-            if (cookiePathOverride) {
-                chosenClient = YTDLP_AUTHED_CLIENTS;
-                ytdlpArgs.push('--cookies', cookiePathOverride);
-                ytdlpArgs.push('--js-runtimes', 'node');
-                ytdlpArgs.push('--extractor-args', `youtube:player_client=${chosenClient}`);
-                logger.info(`Age-gate cookie retry using authed player client(s) [${chosenClient}]`);
-            } else {
-                ytdlpArgs.push('--extractor-args', `youtube:player_client=${chosenClient}`);
-            }
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            if (signal?.aborted) throw new AppError('CANCELLED');
+            const tempPath = path.join(WORK_DIR, `ripcord_${randomUUID()}.${extension}`);
 
-            if (YTDLP_USE_ARIA2C && aria2cAvailable) ytdlpArgs.push('--downloader', 'aria2c');
+            try {
+                return await new Promise((resolve, reject) => {
+                    const formatSelector = targetFormat === 'ogg'
+                        ? 'bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio/best'
+                        : targetFormat === 'm4a'
+                            ? 'bestaudio[acodec^=mp4a]/bestaudio[ext=m4a]/bestaudio[acodec=aac]/bestaudio/best'
+                            : 'bestaudio/best';
+                    const ytdlpArgs = [
+                        '--ignore-config',
+                        '-f', formatSelector,
+                        '--no-playlist',
+                        '--no-warnings',
+                        '--max-filesize', `${Math.floor(MAX_DOWNLOAD_BYTES / (1024 * 1024))}M`,
+                        '--concurrent-fragments', String(YTDLP_CONCURRENT_FRAGMENTS),
+                        '--print', 'before_dl:RIPCORD_INFO %(format_id)s'
+                    ];
 
-            if (onProgress) {
-                ytdlpArgs.push('--newline', '--progress', '--progress-template',
-                    'download:RIPCORD_PROGRESS %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s');
-            }
+                    let chosenClient = 'visionos,android,web';
+                    if (cookiePathOverride) {
+                        chosenClient = YTDLP_AUTHED_CLIENTS;
+                        ytdlpArgs.push('--cookies', cookiePathOverride);
+                        ytdlpArgs.push('--js-runtimes', 'node');
+                        ytdlpArgs.push('--extractor-args', `youtube:player_client=${chosenClient}`);
+                        logger.info(`Age-gate cookie retry using authed player client(s) [${chosenClient}]`);
+                    } else {
+                        ytdlpArgs.push('--extractor-args', `youtube:player_client=${chosenClient}`);
+                    }
 
-            ytdlpArgs.push('-o', tempPath, '--', canonicalTarget);
+                    if (YTDLP_USE_ARIA2C && aria2cAvailable) ytdlpArgs.push('--downloader', 'aria2c');
 
-            const ytdlp = spawn('yt-dlp', ytdlpArgs);
-            let detectedFormatId = 'unknown';
-            let detectedClient = chosenClient;
+                    if (onProgress) {
+                        ytdlpArgs.push('--newline', '--progress', '--progress-template',
+                            'download:RIPCORD_PROGRESS %(progress.downloaded_bytes)s %(progress.total_bytes,progress.total_bytes_estimate)s');
+                    }
 
-            ytdlp.stdout.on('data', chunk => {
-                const text = chunk.toString();
-                const infoMatch = text.match(/RIPCORD_INFO\s+(\S+)/);
-                if (infoMatch) detectedFormatId = infoMatch[1];
-                if (!onProgress) return;
-                const matches = [...text.matchAll(/RIPCORD_PROGRESS (\d+) (\d+(?:\.\d+)?)/g)];
-                const last = matches[matches.length - 1];
-                if (last && Number(last[2]) > 0) onProgress(Math.min(1, Number(last[1]) / Number(last[2])));
-            });
-            let timedOut = false;
+                    ytdlpArgs.push('-o', tempPath, '--', canonicalTarget);
 
-            const timeout = setTimeout(() => {
-                timedOut = true;
-                ytdlp.kill('SIGKILL');
-            }, 90000);
-            const onAbort = () => ytdlp.kill('SIGKILL');
-            if (signal?.aborted) onAbort();
-            else signal?.addEventListener('abort', onAbort, { once: true });
+                    const ytdlp = spawn('yt-dlp', ytdlpArgs);
+                    let detectedFormatId = 'unknown';
+                    let detectedClient = chosenClient;
 
-            let stderr = '';
-            ytdlp.stderr.on('data', (data) => {
-                const text = data.toString();
-                stderr = (stderr + text).slice(-8000);
-                const clientMatch = text.match(/Downloading\s+(\w+)\s+player API JSON/i);
-                if (clientMatch) detectedClient = clientMatch[1];
-                logger.warn(`yt-dlp: ${text.trim()}`);
-            });
+                    ytdlp.stdout.on('data', chunk => {
+                        const text = chunk.toString();
+                        const infoMatch = text.match(/RIPCORD_INFO\s+(\S+)/);
+                        if (infoMatch) detectedFormatId = infoMatch[1];
+                        if (!onProgress) return;
+                        const matches = [...text.matchAll(/RIPCORD_PROGRESS (\d+) (\d+(?:\.\d+)?)/g)];
+                        const last = matches[matches.length - 1];
+                        if (last && Number(last[2]) > 0) onProgress(Math.min(1, Number(last[1]) / Number(last[2])));
+                    });
+                    let timedOut = false;
 
-            ytdlp.on('close', (code) => {
-                clearTimeout(timeout);
-                signal?.removeEventListener('abort', onAbort);
-                if (signal?.aborted) {
-                    cleanupFiles([tempPath]);
-                    stageTimer.end('failed', { code: 'CANCELLED' });
-                    reject(new AppError('CANCELLED'));
-                } else if (timedOut) {
-                    cleanupFiles([tempPath]);
-                    stageTimer.end('failed', { code: 'TIMEOUT' });
-                    reject(new AppError('TIMEOUT', { userMessage: 'Audio download timed out.' }));
-                } else if (code === 0 && fs.existsSync(tempPath) && fs.statSync(tempPath).size <= MAX_DOWNLOAD_BYTES) {
-                    downloadMetaMap.set(tempPath, { formatId: detectedFormatId, client: detectedClient });
-                    stageTimer.end('ok');
-                    resolve(tempPath);
-                } else {
-                    cleanupFiles([tempPath]);
-                    const err = new Error('yt-dlp was unable to extract this audio source.');
-                    err.stderr = stderr;
-                    err.exitCode = code;
-                    const appErr = classifyError(err, stderr);
-                    stageTimer.end('failed', { code: appErr.code });
-                    reject(appErr);
+                    const timeout = setTimeout(() => {
+                        timedOut = true;
+                        ytdlp.kill('SIGKILL');
+                    }, 90000);
+                    const onAbort = () => ytdlp.kill('SIGKILL');
+                    if (signal?.aborted) onAbort();
+                    else signal?.addEventListener('abort', onAbort, { once: true });
+
+                    let stderr = '';
+                    ytdlp.stderr.on('data', (data) => {
+                        const text = data.toString();
+                        stderr = (stderr + text).slice(-8000);
+                        const clientMatch = text.match(/Downloading\s+(\w+)\s+player API JSON/i);
+                        if (clientMatch) detectedClient = clientMatch[1];
+                        logger.warn(`yt-dlp: ${text.trim()}`);
+                    });
+
+                    ytdlp.on('close', (code) => {
+                        clearTimeout(timeout);
+                        signal?.removeEventListener('abort', onAbort);
+                        if (signal?.aborted) {
+                            cleanupFiles([tempPath]);
+                            reject(new AppError('CANCELLED'));
+                        } else if (timedOut) {
+                            cleanupFiles([tempPath]);
+                            reject(new AppError('TIMEOUT', { userMessage: 'Audio download timed out.' }));
+                        } else if (code === 0 && fs.existsSync(tempPath) && fs.statSync(tempPath).size <= MAX_DOWNLOAD_BYTES) {
+                            downloadMetaMap.set(tempPath, { formatId: detectedFormatId, client: detectedClient });
+                            stageTimer.end('ok');
+                            resolve(tempPath);
+                        } else {
+                            cleanupFiles([tempPath]);
+                            const err = new Error('yt-dlp was unable to extract this audio source.');
+                            err.stderr = stderr;
+                            err.exitCode = code;
+                            const appErr = classifyError(err, stderr);
+                            reject(appErr);
+                        }
+                    });
+
+                    ytdlp.on('error', (err) => {
+                        clearTimeout(timeout);
+                        signal?.removeEventListener('abort', onAbort);
+                        cleanupFiles([tempPath]);
+                        err.stderr = stderr;
+                        const appErr = classifyError(err, stderr);
+                        reject(appErr);
+                    });
+                });
+            } catch (err) {
+                lastError = err;
+                if (signal?.aborted) throw err;
+                const isTransientCdnError = /http error 403: forbidden|unable to download video data/i.test(err?.stderr || '') || err?.code === 'RATE_LIMITED';
+                if (attempt < maxAttempts && isTransientCdnError) {
+                    logger.warn(`Transient YouTube CDN error on download (attempt ${attempt}/${maxAttempts}), retrying in 1s...`);
+                    await new Promise(r => setTimeout(r, 1000));
+                    continue;
                 }
-            });
-
-            ytdlp.on('error', (err) => {
-                clearTimeout(timeout);
-                signal?.removeEventListener('abort', onAbort);
-                cleanupFiles([tempPath]);
-                err.stderr = stderr;
-                const appErr = classifyError(err, stderr);
-                stageTimer.end('failed', { code: appErr.code });
-                reject(appErr);
-            });
-        });
+                throw err;
+            }
+        }
+        throw lastError;
+    } catch (err) {
+        stageTimer.end('failed', { code: err?.code || 'INTERNAL' });
+        throw err;
     } finally {
         ytdlpSemaphore.release();
     }

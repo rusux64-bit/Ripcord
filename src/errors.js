@@ -163,7 +163,7 @@ const CLASSIFIER_RULES = [
     },
     {
         code: 'RATE_LIMITED',
-        test: (combined, err) => err?.status === 429 || err?.response?.status === 429 || /http error 429|too many requests|rate limit/i.test(combined)
+        test: (combined, err) => err?.status === 429 || err?.response?.status === 429 || /http error 429|too many requests|rate limit|http error 403: forbidden|unable to download video data.*(?:403|forbidden)/i.test(combined)
     },
     {
         code: 'AGE_RESTRICTED',
