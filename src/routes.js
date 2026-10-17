@@ -16,7 +16,7 @@ const {
     JOB_ID_PATTERN
 } = require('./config');
 
-const { Logger, startStage, safeMetadataText } = require('./logger');
+const { Logger, startStage, safeMetadataText, sanitizeAsciiHeader } = require('./logger');
 const { AppError, classifyError, sendError } = require('./errors');
 const { AsyncBoundedQueue, downloadQueue, metadataSemaphore } = require('./queue');
 const {
@@ -25,7 +25,7 @@ const {
     cleanupFiles,
     parseCoverUrl
 } = require('./media');
-const { spotifyLinkDetails, getSpotifyData } = require('./spotify');
+const { spotifyLinkDetails, getSpotifyData, spotifyMatchCache } = require('./spotify');
 const {
     isSafeUrl,
     isYouTubeUrl,
@@ -37,7 +37,9 @@ const {
     downloadSpotifyAudioWithFallback,
     downloadPlaylistTrack,
     processPlaylistTrack,
-    processAndStreamAudio
+    processAndStreamAudio,
+    findSpotifyCandidates,
+    ageRestrictedCache
 } = require('./youtube');
 
 function createRateLimiter(limit, message) {
@@ -290,12 +292,45 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                         }
 
                         try {
-                            const candidates = await require('./youtube').findSpotifyCandidates(track, signal, taskLogger, jobExcludedVideoIds);
-                            if (candidates && candidates.length > 0) {
-                                await searchHandoffQueue.push({ track: { ...track, candidates }, index });
-                            } else {
-                                report(index, { state: 'failed', error: 'No search result matched the Spotify title and artist.' });
+                            const spotifyTrackId = track.id || track.uri;
+                            let matchedCandidates = null;
+
+                            if (spotifyTrackId) {
+                                const cached = spotifyMatchCache.get(spotifyTrackId);
+                                if (cached && !jobExcludedVideoIds.has(cached.videoId) && !ageRestrictedCache.has(cached.videoId)) {
+                                    taskLogger.info(`[Spotify match cache hit] [track:${index + 1}] ${sanitizeAsciiHeader(track.title)} - ${sanitizeAsciiHeader(track.artist)} -> ${sanitizeAsciiHeader(cached.matchedTitle || '')} [${cached.videoId}]`);
+                                    matchedCandidates = [{
+                                        videoId: cached.videoId,
+                                        score: cached.score,
+                                        confidence: cached.confidence,
+                                        matchedTitle: cached.matchedTitle,
+                                        reasons: ['cached_match']
+                                    }];
+                                }
                             }
+
+                            if (!matchedCandidates) {
+                                matchedCandidates = await findSpotifyCandidates(track, signal, taskLogger.child({ trackIndex: index }), jobExcludedVideoIds);
+                                if (matchedCandidates && matchedCandidates.length > 0 && spotifyTrackId && matchedCandidates[0]?.score >= 0.9) {
+                                    spotifyMatchCache.set(spotifyTrackId, matchedCandidates[0]);
+                                }
+                            }
+
+                            if (!matchedCandidates || matchedCandidates.length === 0) {
+                                taskLogger.warn(`[track:${index + 1}] No matching YouTube candidate found for Spotify track: ${sanitizeAsciiHeader(track.title)} - ${sanitizeAsciiHeader(track.artist)}`);
+                                report(index, { state: 'failed', error: 'No YouTube match found.' });
+                                continue;
+                            }
+
+                            await searchHandoffQueue.push({
+                                track: {
+                                    ...track,
+                                    candidates: matchedCandidates,
+                                    url: `https://www.youtube.com/watch?v=${matchedCandidates[0].videoId}`,
+                                    videoId: matchedCandidates[0].videoId
+                                },
+                                index
+                            });
                         } catch (searchErr) {
                             if (signal.aborted) return;
                             taskLogger.warn(`[track:${index + 1}] Search error: ${searchErr.message}`);

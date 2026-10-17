@@ -1134,6 +1134,7 @@ async function downloadSpotifyAudioWithFallback({
                 if (attempt + 1 < maxAttempts) {
                     continue; // try next candidate
                 }
+                break;
             }
             throw err;
         }
