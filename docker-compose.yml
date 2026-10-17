@@ -57,8 +57,11 @@ services:
     volumes:
       # Persistent Spotify-to-YouTube match cache across restarts:
       - cache:/app/cache
-      # Dedicated throwaway age-gate cookie accounts directory (read-only):
-      # - ./age_cookies:/app/age_cookies:ro
+      # Dedicated throwaway age-gate cookie accounts directory (owner-only writable):
+      # Set permissions on host: chown -R 1000:1000 ./age_cookies && chmod 700 ./age_cookies
+      # Mounted :rw so the pool can write refreshed session tokens back to persist logins.
+      # Trade-off: :ro prevents container modifications, but cookies cannot refresh and will expire prematurely.
+      # - ./age_cookies:/app/age_cookies:rw
       # [Deprecated] Single fallback cookie file:
       # - ./cookies.txt:/app/cookies.txt:ro
 

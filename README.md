@@ -52,6 +52,22 @@ All configuration is optional and handled via environment variables (or `.env`).
 
 See `.env.example` for all options.
 
+### Age-gate cookie pool
+
+For age-restricted YouTube videos, Ripcord supports an isolated pool of throwaway accounts:
+1. Put Netscape-format cookie files (`account_*.txt`) in a dedicated directory on the host (e.g. `./age_cookies`).
+2. Restrict host permissions to owner-only (`UID 1000` for the rootless container):
+   ```bash
+   chown -R 1000:1000 ./age_cookies && chmod 700 ./age_cookies
+   ```
+3. Mount the directory as writable (`:rw`) in `docker-compose.yml`:
+   ```yaml
+   - ./age_cookies:/app/age_cookies:rw
+   ```
+   - **Why `:rw`:** The pool writes refreshed session tokens back to host files after successful requests, preventing premature account expiration.
+   - **Trade-off with `:ro`:** Mounting `:ro` prevents container modifications to host files, but refreshed tokens cannot be saved, so cookies expire sooner and require manual re-export.
+
 ## License
 
 AGPL-3.0-or-later
+
