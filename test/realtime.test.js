@@ -32,6 +32,20 @@ childProcess.spawn = (cmd, args) => {
     return proc;
 };
 
+const realExecFile = childProcess.execFile;
+childProcess.execFile = (cmd, args, options, callback) => {
+    const cb = typeof options === 'function' ? options : callback;
+    if (cmd === 'yt-dlp') {
+        if (typeof cb === 'function') setTimeout(() => cb(null, '2026.10.21\n', ''), 5);
+        return;
+    }
+    if (cmd && String(cmd).includes('ffmpeg')) {
+        if (typeof cb === 'function') setTimeout(() => cb(null, 'ffmpeg version 6.1\n', ''), 5);
+        return;
+    }
+    return realExecFile(cmd, args, options, callback);
+};
+
 const strong = [{ id: 'AAAAAAAAAAA', title: 'Test Artist - Test Song', uploader: 'Test Artist - Topic', duration: 200 }];
 const weak = [{ id: 'BBBBBBBBBBB', title: 'Something unrelated entirely', uploader: 'Nobody', duration: 60 }];
 const track = { title: 'Test Song', artist: 'Test Artist', durationMs: 200000, uri: 'spotify:track:TESTTRACK1' };
@@ -129,45 +143,48 @@ test('SSE stream pushes job updates immediately and closes when the job ends', a
     const app = express();
     registerRoutes(app);
     const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
-    const { port } = server.address();
-    const jobId = 'sse-test-job-0001';
+    try {
+        const { port } = server.address();
+        const jobId = 'sse-test-job-0001';
 
-    const events = [];
-    const done = new Promise((resolve, reject) => {
-        http.get({ port, host: '127.0.0.1', path: `/api/progress/${jobId}/stream` }, res => {
-            assert.equal(res.statusCode, 200);
-            assert.match(res.headers['content-type'], /text\/event-stream/);
-            let buf = '';
-            res.on('data', chunk => {
-                buf += chunk;
-                let i;
-                while ((i = buf.indexOf('\n\n')) !== -1) {
-                    const frame = buf.slice(0, i);
-                    buf = buf.slice(i + 2);
-                    if (frame.startsWith('data: ')) events.push(JSON.parse(frame.slice(6)));
-                }
-            });
-            res.on('end', resolve);
-            res.on('error', reject);
-        }).on('error', reject);
-    });
+        const events = [];
+        const done = new Promise((resolve, reject) => {
+            http.get({ port, host: '127.0.0.1', path: `/api/progress/${jobId}/stream` }, res => {
+                assert.equal(res.statusCode, 200);
+                assert.match(res.headers['content-type'], /text\/event-stream/);
+                let buf = '';
+                res.on('data', chunk => {
+                    buf += chunk;
+                    let i;
+                    while ((i = buf.indexOf('\n\n')) !== -1) {
+                        const frame = buf.slice(0, i);
+                        buf = buf.slice(i + 2);
+                        if (frame.startsWith('data: ')) events.push(JSON.parse(frame.slice(6)));
+                    }
+                });
+                res.on('end', resolve);
+                res.on('error', reject);
+            }).on('error', reject);
+        });
 
-    await new Promise(r => setTimeout(r, 100));            // client subscribed before the job exists
-    const job = queue.createJob(jobId, [{ title: 'One', artist: 'A' }]);
-    await new Promise(r => setTimeout(r, 300));
-    job.tracks[0].state = 'downloading';
-    job.tracks[0].progress = 0.5;
-    queue.notifyJob(jobId);
-    await new Promise(r => setTimeout(r, 300));
-    queue.endJob(jobId, 'finished');
-    await done;                                            // stream must end on its own
+        await new Promise(r => setTimeout(r, 100));            // client subscribed before the job exists
+        const job = queue.createJob(jobId, [{ title: 'One', artist: 'A' }]);
+        await new Promise(r => setTimeout(r, 300));
+        job.tracks[0].state = 'downloading';
+        job.tracks[0].progress = 0.5;
+        queue.notifyJob(jobId);
+        await new Promise(r => setTimeout(r, 300));
+        queue.endJob(jobId, 'finished');
+        await done;                                            // stream must end on its own
 
-    assert.ok(events.length >= 3, `got ${events.length} events`);
-    assert.equal(events[0].tracks[0].state, 'queued');
-    assert.ok(events.some(e => e.tracks[0].state === 'downloading' && e.tracks[0].progress === 0.5));
-    assert.equal(events.at(-1).status, 'finished');
-    assert.equal(queue.progressStreams.size, 0, 'stream registry must be cleaned up');
-    await new Promise(r => server.close(r));
+        assert.ok(events.length >= 3, `got ${events.length} events`);
+        assert.equal(events[0].tracks[0].state, 'queued');
+        assert.ok(events.some(e => e.tracks[0].state === 'downloading' && e.tracks[0].progress === 0.5));
+        assert.equal(events.at(-1).status, 'finished');
+        assert.equal(queue.progressStreams.size, 0, 'stream registry must be cleaned up');
+    } finally {
+        await new Promise(r => server.close(r));
+    }
 });
 
 test('SSE rejects malformed job ids', async () => {
@@ -176,11 +193,14 @@ test('SSE rejects malformed job ids', async () => {
     const app = express();
     registerRoutes(app);
     const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
-    const status = await new Promise(resolve => {
-        http.get({ port: server.address().port, host: '127.0.0.1', path: '/api/progress/x/stream' }, res => { res.resume(); resolve(res.statusCode); });
-    });
-    assert.equal(status, 404);
-    await new Promise(r => server.close(r));
+    try {
+        const status = await new Promise(resolve => {
+            http.get({ port: server.address().port, host: '127.0.0.1', path: '/api/progress/x/stream' }, res => { res.resume(); resolve(res.statusCode); });
+        });
+        assert.equal(status, 404);
+    } finally {
+        await new Promise(r => server.close(r));
+    }
 });
 
 test('endJob marks incomplete tracks as failed with code and error', () => {
@@ -210,18 +230,21 @@ test('api/ready returns 200 with readiness status', async () => {
     const app = express();
     registerRoutes(app);
     const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
-    const resData = await new Promise((resolve, reject) => {
-        http.get({ port: server.address().port, host: '127.0.0.1', path: '/api/ready' }, res => {
-            let buf = '';
-            res.on('data', c => buf += c);
-            res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(buf) }));
-        }).on('error', reject);
-    });
-    assert.equal(resData.status, 200);
-    assert.equal(resData.body.status, 'ready');
-    assert.equal(resData.body.storage, 'ok');
-    assert.equal(resData.body.ffmpeg, 'ok');
-    await new Promise(r => server.close(r));
+    try {
+        const resData = await new Promise((resolve, reject) => {
+            http.get({ port: server.address().port, host: '127.0.0.1', path: '/api/ready' }, res => {
+                let buf = '';
+                res.on('data', c => buf += c);
+                res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(buf) }));
+            }).on('error', reject);
+        });
+        assert.equal(resData.status, 200);
+        assert.equal(resData.body.status, 'ready');
+        assert.equal(resData.body.storage, 'ok');
+        assert.equal(resData.body.ffmpeg, 'ok');
+    } finally {
+        await new Promise(r => server.close(r));
+    }
 });
 
 test('killProcessGroup terminates safely without throwing', () => {

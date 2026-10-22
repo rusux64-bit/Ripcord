@@ -12,6 +12,7 @@ jobs:
   test:
     name: Lint, Test & Build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -43,6 +44,7 @@ jobs:
         run: npm run lint
 
       - name: Run tests
+        timeout-minutes: 2
         run: npm test
 
       - name: Install Python fonttools
@@ -61,6 +63,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Integration health check
+        timeout-minutes: 2
         run: |
           sudo apt-get update && sudo apt-get install -y ffmpeg
           node server.js &
