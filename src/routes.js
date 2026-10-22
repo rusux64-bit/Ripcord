@@ -1,4 +1,7 @@
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { execFile } = require('child_process');
 const { randomUUID } = require('crypto');
 const { Transform } = require('stream');
 const axios = require('axios');
@@ -13,7 +16,8 @@ const {
     SPOTIFY_SEARCH_CONCURRENCY,
     DOWNLOAD_CONCURRENCY,
     ENCODE_CONCURRENCY,
-    JOB_ID_PATTERN
+    JOB_ID_PATTERN,
+    ffmpegPath
 } = require('./config');
 
 const { Logger, startStage, safeMetadataText, sanitizeAsciiHeader } = require('./logger');
@@ -463,9 +467,68 @@ function registerRoutes(app) {
 
     app.use('/api', createRateLimiter(API_RATE_LIMIT_MAX, 'Too many requests. Please wait before trying again.'));
 
-    // health check route so uptime monitors know the server is running
+    // health check route so uptime monitors know the server is running (liveness)
     app.get('/api/health', (req, res) => {
         res.json({ status: 'ok' });
+    });
+
+    // deep readiness check for orchestrators / self-hosters (validates binaries & writable storage)
+    let lastReadyCheck = 0;
+    let lastReadyResult = null;
+    const READY_CACHE_TTL_MS = 10000;
+
+    app.get('/api/ready', async (req, res) => {
+        const now = Date.now();
+        if (lastReadyResult && now - lastReadyCheck < READY_CACHE_TTL_MS) {
+            return res.status(lastReadyResult.status === 'ready' ? 200 : 503).json(lastReadyResult);
+        }
+
+        const checks = {
+            status: 'ready',
+            ytdlp: null,
+            ffmpeg: null,
+            storage: null
+        };
+
+        try {
+            const ytdlpVer = await new Promise((resolve, reject) => {
+                execFile('yt-dlp', ['--version'], { timeout: 3000 }, (err, stdout) => {
+                    if (err) return reject(new Error(`yt-dlp check failed: ${err.message}`));
+                    resolve(stdout.trim());
+                });
+            });
+            checks.ytdlp = ytdlpVer;
+        } catch (err) {
+            checks.status = 'not_ready';
+            checks.ytdlp = err.message;
+        }
+
+        try {
+            await new Promise((resolve, reject) => {
+                execFile(ffmpegPath, ['-version'], { timeout: 3000 }, (err) => {
+                    if (err) return reject(new Error(`ffmpeg check failed: ${err.message}`));
+                    resolve('ok');
+                });
+            });
+            checks.ffmpeg = 'ok';
+        } catch (err) {
+            checks.status = 'not_ready';
+            checks.ffmpeg = err.message;
+        }
+
+        try {
+            const testFile = path.join(os.tmpdir(), `.ripcord-ready-${Date.now()}-${process.pid}`);
+            fs.writeFileSync(testFile, 'ok');
+            fs.unlinkSync(testFile);
+            checks.storage = 'ok';
+        } catch (err) {
+            checks.status = 'not_ready';
+            checks.storage = err.message;
+        }
+
+        lastReadyCheck = now;
+        lastReadyResult = checks;
+        res.status(checks.status === 'ready' ? 200 : 503).json(checks);
     });
 
     // inspect a link and return title, artist, and cover art

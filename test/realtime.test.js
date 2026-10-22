@@ -203,3 +203,29 @@ test('cancelAllPrewarms cleans up inflight prewarm tasks', () => {
     youtube.prewarmSpotifyMatches([t]);
     youtube.cancelAllPrewarms();
 });
+
+test('api/ready returns 200 with readiness status', async () => {
+    const express = require('express');
+    const { registerRoutes } = require('../src/routes');
+    const app = express();
+    registerRoutes(app);
+    const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
+    const resData = await new Promise((resolve, reject) => {
+        http.get({ port: server.address().port, host: '127.0.0.1', path: '/api/ready' }, res => {
+            let buf = '';
+            res.on('data', c => buf += c);
+            res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(buf) }));
+        }).on('error', reject);
+    });
+    assert.equal(resData.status, 200);
+    assert.equal(resData.body.status, 'ready');
+    assert.equal(resData.body.storage, 'ok');
+    assert.equal(resData.body.ffmpeg, 'ok');
+    await new Promise(r => server.close(r));
+});
+
+test('killProcessGroup terminates safely without throwing', () => {
+    youtube.killProcessGroup(null);
+    youtube.killProcessGroup({});
+    youtube.killProcessGroup({ pid: -999999 });
+});

@@ -111,6 +111,7 @@ const state = {
     xhr: null,
     blob: null,
     blobName: '',
+    blobCleanupTimer: 0,
     timer: 0,
     startedAt: 0,
     jobId: '',
@@ -1444,6 +1445,9 @@ el.backBtn.addEventListener('click', () => {
 
 function startDownload() {
     clearErrorBanner('options');
+    clearTimeout(state.blobCleanupTimer);
+    state.blobCleanupTimer = 0;
+    state.blob = null;
     const info = state.info;
     const isCollection = info.type === 'collection';
     const fmt = currentFormat();
@@ -1524,6 +1528,12 @@ function startDownload() {
 
             saveBlob();
             finish(isCollection);
+
+            // Free large blob heap memory after 5 minutes of idle on the done screen
+            clearTimeout(state.blobCleanupTimer);
+            state.blobCleanupTimer = setTimeout(() => {
+                state.blob = null;
+            }, 5 * 60 * 1000);
         } else {
             let data = {};
             const requestId = xhr.getResponseHeader('X-Request-Id') || '';
@@ -1940,11 +1950,17 @@ el.cancelBtn.addEventListener('click', () => {
     go('options', 'back');
 });
 el.saveBtn.addEventListener('click', () => {
-    logClientEvent('action', 'Saved audio file again');
-    saveBlob();
+    if (state.blob) {
+        logClientEvent('action', 'Saved audio file again');
+        saveBlob();
+    } else {
+        toast('File was already saved to your downloads folder.', 3000);
+    }
 });
 el.againBtn.addEventListener('click', () => {
     logClientEvent('action', 'Resetting to rip another track');
+    clearTimeout(state.blobCleanupTimer);
+    state.blobCleanupTimer = 0;
     state.blob = null;
     state.blobName = '';
     state.info = null;

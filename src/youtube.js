@@ -626,6 +626,19 @@ function rankCandidates(track, candidates, options = {}) {
     return evaluated;
 }
 
+function killProcessGroup(proc, signal = 'SIGKILL') {
+    if (!proc || !proc.pid) return;
+    try {
+        if (process.platform !== 'win32') {
+            process.kill(-proc.pid, signal);
+        } else {
+            proc.kill(signal);
+        }
+    } catch {
+        try { proc.kill(signal); } catch { /* ignore */ }
+    }
+}
+
 async function searchYouTubeCandidates(query, maxCandidates, signal, logger = Logger) {
     const stageTimer = startStage(logger, 'search');
     const searchTarget = `ytsearch${maxCandidates}:${query}`;
@@ -642,19 +655,22 @@ async function searchYouTubeCandidates(query, maxCandidates, signal, logger = Lo
             stageTimer.end('failed', { code: 'CANCELLED' });
             return reject(new AppError('CANCELLED'));
         }
-        const ytdlp = spawn('yt-dlp', args);
+        const ytdlp = spawn('yt-dlp', args, {
+            detached: process.platform !== 'win32',
+            windowsHide: true
+        });
         let output = '';
         let outputBytes = 0;
         let timedOut = false;
         const timeout = setTimeout(() => {
             timedOut = true;
-            ytdlp.kill('SIGKILL');
+            killProcessGroup(ytdlp, 'SIGKILL');
         }, 30000);
-        const onAbort = () => ytdlp.kill('SIGKILL');
+        const onAbort = () => killProcessGroup(ytdlp, 'SIGKILL');
         signal?.addEventListener('abort', onAbort, { once: true });
         ytdlp.stdout.on('data', chunk => {
             outputBytes += chunk.length;
-            if (outputBytes > 2 * 1024 * 1024) ytdlp.kill('SIGKILL');
+            if (outputBytes > 2 * 1024 * 1024) killProcessGroup(ytdlp, 'SIGKILL');
             else output += chunk.toString();
         });
         let stderr = '';
@@ -886,15 +902,18 @@ async function getYoutubePlaylistData(url, signal) {
             url
         ];
 
-        const ytdlp = spawn('yt-dlp', ytdlpArgs);
+        const ytdlp = spawn('yt-dlp', ytdlpArgs, {
+            detached: process.platform !== 'win32',
+            windowsHide: true
+        });
         let output = '';
         let timedOut = false;
 
         const timeout = setTimeout(() => {
             timedOut = true;
-            ytdlp.kill('SIGKILL');
+            killProcessGroup(ytdlp, 'SIGKILL');
         }, 30000);
-        const onAbort = () => ytdlp.kill('SIGKILL');
+        const onAbort = () => killProcessGroup(ytdlp, 'SIGKILL');
         if (signal?.aborted) onAbort();
         else signal?.addEventListener('abort', onAbort, { once: true });
 
@@ -902,7 +921,7 @@ async function getYoutubePlaylistData(url, signal) {
         ytdlp.stdout.on('data', (data) => {
             outputBytes += data.length;
             if (outputBytes > MAX_PLAYLIST_OUTPUT_BYTES) {
-                ytdlp.kill('SIGKILL');
+                killProcessGroup(ytdlp, 'SIGKILL');
                 return;
             }
             output += data.toString();
@@ -1023,7 +1042,10 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal, targetForma
 
                     ytdlpArgs.push('-o', tempPath, '--', canonicalTarget);
 
-                    const ytdlp = spawn('yt-dlp', ytdlpArgs);
+                    const ytdlp = spawn('yt-dlp', ytdlpArgs, {
+                        detached: process.platform !== 'win32',
+                        windowsHide: true
+                    });
                     let detectedFormatId = 'unknown';
                     let detectedClient = chosenClient;
 
@@ -1040,9 +1062,9 @@ async function downloadToTemp(targetUrl, extension = 'webm', signal, targetForma
 
                     const timeout = setTimeout(() => {
                         timedOut = true;
-                        ytdlp.kill('SIGKILL');
+                        killProcessGroup(ytdlp, 'SIGKILL');
                     }, 90000);
-                    const onAbort = () => ytdlp.kill('SIGKILL');
+                    const onAbort = () => killProcessGroup(ytdlp, 'SIGKILL');
                     if (signal?.aborted) onAbort();
                     else signal?.addEventListener('abort', onAbort, { once: true });
 
@@ -1642,10 +1664,12 @@ async function processAndStreamAudio(target, bitrate, format, thumbnailUrl, res,
         readStream.pipe(res);
         readStream.on('error', () => res.destroy());
 
-        readStream.on('end', () => {
+        const onStreamDone = () => {
             res.removeListener('close', onDisconnect);
             cleanupFiles(tempFiles);
-        });
+        };
+        readStream.on('end', onStreamDone);
+        readStream.on('close', onStreamDone);
     } catch (err) {
         res.removeListener('close', onDisconnect);
         cleanupFiles(tempFiles);
@@ -1673,6 +1697,7 @@ module.exports = {
     scoreSpotifyCandidate,
     generateSearchQueries,
     rankCandidates,
+    killProcessGroup,
     searchYouTubeCandidates,
     AgeGateLruCache,
     ageRestrictedCache,

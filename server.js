@@ -108,6 +108,7 @@ module.exports = {
     scoreSpotifyCandidate: youtube.scoreSpotifyCandidate,
     generateSearchQueries: youtube.generateSearchQueries,
     rankCandidates: youtube.rankCandidates,
+    killProcessGroup: youtube.killProcessGroup,
     searchYouTubeCandidates: youtube.searchYouTubeCandidates,
     AgeGateLruCache: youtube.AgeGateLruCache,
     ageRestrictedCache: youtube.ageRestrictedCache,
