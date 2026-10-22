@@ -115,6 +115,9 @@ const state = {
     startedAt: 0,
     jobId: '',
     poll: 0,
+    pollEvery: 1000,
+    es: null,
+    single: false,
     rows: [],
     activeRow: -1,
     lastJob: null,
@@ -1465,7 +1468,9 @@ function startDownload() {
         ? 'Collections are prepared track by track, so this can take a few minutes. You can leave this tab open.'
         : 'Finding the audio and converting it. Usually under a minute.';
 
-    state.jobId = isCollection ? newJobId() : '';
+    // Spotify singles are slow (match, download, convert), so they get the same live progress feed as collections
+    state.single = !isCollection && /^https:\/\/open\.spotify\.com\//.test(state.url);
+    state.jobId = (isCollection || state.single) ? newJobId() : '';
     if (state.jobId) params.set('job', state.jobId);
     renderTrackList(isCollection ? collectionTracks(info) : []);
 
@@ -1537,7 +1542,7 @@ function startDownload() {
     xhr.onabort = () => { stopTimer(); };
 
     xhr.send();
-    if (state.jobId) pollJob(state.jobId);
+    if (state.jobId) watchJob(state.jobId);
     go('working', 'forward');
 }
 
@@ -1701,7 +1706,30 @@ function scrollRowIntoView(index) {
     }
 }
 
+const SINGLE_LABELS = {
+    queued: 'Getting started',
+    matching: 'Finding the best audio match',
+    downloading: 'Downloading',
+    encoding: 'Converting',
+    done: 'Almost there',
+    failed: 'Something went wrong'
+};
+
+function applySingleJob(job) {
+    const track = Array.isArray(job.tracks) ? job.tracks[0] : null;
+    if (!track) return;
+    const progress = Number(track.progress) || 0;
+    let label = SINGLE_LABELS[track.state] || SINGLE_LABELS.queued;
+    // stay indeterminate until there is something real to measure
+    if ((track.state === 'downloading' && progress > 0) || track.state === 'encoding' || track.state === 'done') {
+        const pct = setProgress(trackFraction(track), label);
+        if (track.state === 'downloading') label = `${label} · ${pct}%`;
+    }
+    el.metaLeft.textContent = label;
+}
+
 function applyJob(job) {
+    if (state.single) return applySingleJob(job);
     state.lastJob = job;
     const tracks = Array.isArray(job.tracks) ? job.tracks : [];
     if (!tracks.length) return;
@@ -1745,14 +1773,44 @@ function pollJob(jobId) {
                 if (job.status && job.status !== 'running') return;
             }
         } catch { /* transient network hiccup; try again on the next tick */ }
-        if (state.jobId === jobId) state.poll = setTimeout(tick, 1000);
+        if (state.jobId === jobId) state.poll = setTimeout(tick, state.pollEvery);
     };
     state.poll = setTimeout(tick, 600);
+}
+
+// Live updates: the server pushes every job change over SSE. The slow poll underneath is a safety net
+// (a proxy that buffers the stream) and becomes the main path if the stream is unavailable.
+function watchJob(jobId) {
+    stopPolling();
+    state.pollEvery = 1000;
+    if (typeof EventSource === 'function') {
+        try {
+            const es = new EventSource(`/api/progress/${encodeURIComponent(jobId)}/stream`);
+            state.es = es;
+            state.pollEvery = 3000;
+            es.onmessage = event => {
+                if (state.jobId !== jobId) return;
+                try { applyJob(JSON.parse(event.data)); } catch { /* ignore a malformed frame */ }
+            };
+            es.onerror = () => {
+                es.close();
+                if (state.es === es) state.es = null;
+                state.pollEvery = 1000;
+            };
+        } catch {
+            state.es = null;
+        }
+    }
+    pollJob(jobId);
 }
 
 function stopPolling() {
     clearTimeout(state.poll);
     state.poll = 0;
+    if (state.es) {
+        state.es.close();
+        state.es = null;
+    }
 }
 
 function saveBlob() {

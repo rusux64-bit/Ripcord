@@ -24,6 +24,9 @@ const {
     metadataSemaphore,
     MAX_TRACKED_JOBS,
     downloadJobs,
+    progressStreams,
+    subscribeJob,
+    notifyJob,
     computeJobSummary,
     createJob,
     endJob
@@ -48,6 +51,8 @@ const {
     processPlaylistTrack,
     processAndStreamAudio,
     findSpotifyCandidates,
+    prewarmSpotifyMatches,
+    awaitPrewarm,
     ageRestrictedCache
 } = require('./youtube');
 
@@ -88,6 +93,13 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
     const jobStartTime = Date.now();
     let job = null;
     const jobExcludedVideoIds = new Set();
+    const report = (index, patch) => {
+        if (job?.tracks[index]) {
+            Object.assign(job.tracks[index], patch);
+            job.summary = computeJobSummary(job);
+            notifyJob(jobId);
+        }
+    };
 
     try {
         taskLogger.info(`Task started (${audioFormat.toUpperCase()})`);
@@ -121,11 +133,14 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             const spotifyData = await getSpotifyData(url, signal);
             const track = spotifyData.tracks[0];
             const trackTitle = customTitle || track.title;
+            job = createJob(jobId, [track]);
+            report(0, { state: 'matching', progress: 0 });
             const downloaded = await downloadSpotifyAudioWithFallback({
                 track,
                 audioFormat,
                 signal,
-                onProgress: undefined,
+                onProgress: job ? fraction => report(0, { state: 'downloading', progress: fraction }) : undefined,
+                onMatched: () => report(0, { state: 'downloading', progress: 0 }),
                 logger: taskLogger,
                 jobExcludedVideoIds,
                 clientIp: req?.ip || req?.socket?.remoteAddress || '127.0.0.1',
@@ -133,7 +148,10 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                     res.setHeader('X-Ripcord-Note', note);
                 }
             });
+            report(0, { state: 'encoding', progress: 0 });
             await processAndStreamAudio(downloaded.tempAudioPath, audioBitrate, audioFormat, track.thumbnail, res, trackTitle, track.artist, signal, req, taskLogger, true);
+            report(0, { state: 'done', progress: 1 });
+            endJob(jobId, 'finished');
             return;
         }
 
@@ -190,12 +208,6 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             const tracks = collectionData.tracks.slice(0, MAX_PLAYLIST_TRACKS);
             let addedTracks = 0;
             job = createJob(jobId, tracks);
-            const report = (index, patch) => {
-                if (job?.tracks[index]) {
-                    Object.assign(job.tracks[index], patch);
-                    job.summary = computeJobSummary(job);
-                }
-            };
 
             try {
                 const searchCapacity = Math.max(8, SPOTIFY_SEARCH_CONCURRENCY * 2);
@@ -226,6 +238,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                             let matchedCandidates = null;
 
                             if (spotifyTrackId) {
+                                await awaitPrewarm(track, signal);
                                 const cached = spotifyMatchCache.get(spotifyTrackId);
                                 if (cached && !jobExcludedVideoIds.has(cached.videoId) && !ageRestrictedCache.has(cached.videoId)) {
                                     taskLogger.info(`[Spotify match cache hit] [track:${index + 1}] ${sanitizeAsciiHeader(track.title)} - ${sanitizeAsciiHeader(track.artist)} -> ${sanitizeAsciiHeader(cached.matchedTitle || '')} [${cached.videoId}]`);
@@ -348,6 +361,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
 
     } catch (error) {
         const appErr = classifyError(error, error?.stderr || '');
+        if (job?.status === 'running') endJob(jobId, signal.aborted ? 'cancelled' : 'failed', appErr);
         if (appErr.code === 'CANCELLED' || signal.aborted || req?.destroyed) {
             taskLogger.info(`Download cancelled: [CANCELLED] Client cancelled or disconnected`);
         } else {
@@ -391,6 +405,60 @@ function registerRoutes(app) {
         if (!job) return res.status(404).json({ status: 'pending' });
         const summary = computeJobSummary(job);
         res.json({ ...job, summary });
+    });
+
+    // push version of the poller: the same payload, sent the moment a job changes instead of once a second
+    const MAX_PROGRESS_STREAMS = 200;
+    const MAX_STREAM_LIFETIME_MS = 30 * 60 * 1000;
+    app.get('/api/progress/:id/stream', createRateLimiter(Math.max(API_RATE_LIMIT_MAX, 120), 'Too many progress streams.'), rejectCrossSiteRequests, (req, res) => {
+        const jobId = req.params.id;
+        if (!JOB_ID_PATTERN.test(jobId) || progressStreams.size >= MAX_PROGRESS_STREAMS) {
+            return res.status(JOB_ID_PATTERN.test(jobId) ? 503 : 404).end();
+        }
+
+        res.set({
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-store, no-transform',
+            'X-Accel-Buffering': 'no'
+        });
+        res.flushHeaders();
+        res.write('retry: 2000\n\n');
+        progressStreams.add(res);
+
+        let timer = null;
+        let lastSent = 0;
+        let closed = false;
+        const cleanup = () => {
+            if (closed) return;
+            closed = true;
+            clearTimeout(timer);
+            clearInterval(heartbeat);
+            clearTimeout(lifetime);
+            unsubscribe();
+            progressStreams.delete(res);
+        };
+        const send = () => {
+            timer = null;
+            if (closed || res.destroyed) return;
+            const job = downloadJobs.get(jobId);
+            if (!job) return;
+            lastSent = Date.now();
+            res.write(`data: ${JSON.stringify({ ...job, summary: computeJobSummary(job) })}\n\n`);
+            if (job.status !== 'running') {
+                cleanup();
+                res.end();
+            }
+        };
+        // coalesce bursts (yt-dlp prints progress many times a second) into at most ~5 messages a second
+        const onChange = () => {
+            if (timer || closed) return;
+            timer = setTimeout(send, Math.max(0, 200 - (Date.now() - lastSent)));
+        };
+        const unsubscribe = subscribeJob(jobId, onChange);
+        const heartbeat = setInterval(() => { if (!res.destroyed) res.write(': keep-alive\n\n'); }, 15000);
+        const lifetime = setTimeout(() => { cleanup(); res.end(); }, MAX_STREAM_LIFETIME_MS);
+        res.once('close', cleanup);
+        onChange();
     });
 
     app.use('/api', createRateLimiter(API_RATE_LIMIT_MAX, 'Too many requests. Please wait before trying again.'));
@@ -460,16 +528,18 @@ function registerRoutes(app) {
             } else if (spotifyLinkDetails(url)?.type === 'track') {
                 const spotifyData = await getSpotifyData(url, controller.signal);
                 const track = spotifyData.tracks[0];
-                return res.json({
+                res.json({
                     type: 'track',
                     title: track.title,
                     artist: track.artist,
                     thumbnail: track.thumbnail,
                     url
                 });
+                prewarmSpotifyMatches([track], Logger);
+                return;
             } else if (spotifyLinkDetails(url)) {
                 const spotifyData = await getSpotifyData(url, controller.signal);
-                return res.json({
+                res.json({
                     type: 'collection',
                     title: spotifyData.name,
                     trackCount: spotifyData.tracks.length,
@@ -477,6 +547,8 @@ function registerRoutes(app) {
                     thumbnail: spotifyData.thumbnail,
                     url
                 });
+                prewarmSpotifyMatches(spotifyData.tracks, Logger);
+                return;
             } else {
                 return sendError(res, new AppError('UNSUPPORTED_URL', { userMessage: 'Unsupported URL. Please provide a Spotify or YouTube link.' }), req);
             }

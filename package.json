@@ -12,7 +12,8 @@
     "lint": "eslint server.js src/ public/script.js",
     "check:syntax": "node --check server.js && node --check public/script.js && node -e \"require('fs').readdirSync('src').forEach(f => f.endsWith('.js') && require('child_process').execSync('node --check src/' + f))\"",
     "check:imports": "node scripts/check-imports.js",
-    "check:icons": "python3 scripts/check-icons.py 2>/dev/null || python scripts/check-icons.py 2>/dev/null || pipx run --spec \"fonttools[brotli,woff]\" python scripts/check-icons.py"
+    "check:icons": "python3 scripts/check-icons.py 2>/dev/null || python scripts/check-icons.py 2>/dev/null || pipx run --spec \"fonttools[brotli,woff]\" python scripts/check-icons.py",
+    "test": "node --test \"test/**/*.test.js\""
   },
   "keywords": [
     "ripcord",

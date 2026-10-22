@@ -59,12 +59,37 @@ function positiveIntegerEnv(name, fallback, max) {
     return value;
 }
 
+function nonNegativeIntegerEnv(name, fallback, max) {
+    const raw = process.env[name];
+    if (raw === undefined || raw === '') return fallback;
+    const value = Number(raw);
+    if (!Number.isSafeInteger(value) || value < 0 || value > max) {
+        throw new Error(`${name} must be an integer between 0 and ${max}.`);
+    }
+    return value;
+}
+
+function scoreEnv(name, fallback) {
+    const raw = process.env[name];
+    if (raw === undefined || raw === '') return fallback;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0.5 || value > 2) {
+        throw new Error(`${name} must be a number between 0.5 and 2 (above 1 disables it).`);
+    }
+    return value;
+}
+
 const PORT = positiveIntegerEnv('PORT', 5224, 65535);
 const RATE_LIMIT_WINDOW_MS = positiveIntegerEnv('RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000, 24 * 60 * 60 * 1000);
 const API_RATE_LIMIT_MAX = positiveIntegerEnv('RATE_LIMIT_MAX', 120, 10000);
 const DOWNLOAD_CONCURRENCY = positiveIntegerEnv('DOWNLOAD_CONCURRENCY', 4, 8);
 const METADATA_CONCURRENCY = positiveIntegerEnv('METADATA_CONCURRENCY', DOWNLOAD_CONCURRENCY, 8);
 const SPOTIFY_SEARCH_CONCURRENCY = positiveIntegerEnv('SPOTIFY_SEARCH_CONCURRENCY', 6, 16);
+// stop after the first yt-dlp search when its best match scores at least this (set above 1 to always run both)
+const SPOTIFY_SEARCH_EARLY_EXIT_SCORE = scoreEnv('SPOTIFY_SEARCH_EARLY_EXIT_SCORE', 0.9);
+// start matching Spotify tracks in the background as soon as the link is inspected (0 disables)
+const SPOTIFY_PREWARM_MAX_TRACKS = nonNegativeIntegerEnv('SPOTIFY_PREWARM_MAX_TRACKS', 6, 30);
+const SPOTIFY_PREWARM_CONCURRENCY = positiveIntegerEnv('SPOTIFY_PREWARM_CONCURRENCY', 2, 4);
 const SPOTIFY_MATCH_CACHE_FILE = process.env.SPOTIFY_MATCH_CACHE_FILE || path.resolve(path.join(__dirname, '..', 'cache', 'spotify_matches.json'));
 const SPOTIFY_MATCH_CACHE_MAX_SIZE = positiveIntegerEnv('SPOTIFY_MATCH_CACHE_MAX_SIZE', 10000, 100000);
 const SPOTIFY_MATCH_CACHE_TTL_DAYS = positiveIntegerEnv('SPOTIFY_MATCH_CACHE_TTL_DAYS', 30, 365);
@@ -125,6 +150,9 @@ module.exports = {
     DOWNLOAD_CONCURRENCY,
     METADATA_CONCURRENCY,
     SPOTIFY_SEARCH_CONCURRENCY,
+    SPOTIFY_SEARCH_EARLY_EXIT_SCORE,
+    SPOTIFY_PREWARM_MAX_TRACKS,
+    SPOTIFY_PREWARM_CONCURRENCY,
     SPOTIFY_MATCH_CACHE_FILE,
     SPOTIFY_MATCH_CACHE_MAX_SIZE,
     SPOTIFY_MATCH_CACHE_TTL_DAYS,

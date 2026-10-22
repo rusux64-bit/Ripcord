@@ -42,14 +42,23 @@ jobs:
       - name: Run ESLint
         run: npm run lint
 
+      - name: Run tests
+        run: npm test
+
       - name: Install Python fonttools
         run: pip install -r scripts/requirements.txt
 
       - name: Verify icons
         run: npm run check:icons
 
-      - name: Non-blocking npm audit
-        run: npm audit --omit=dev || true
+      - name: npm audit (report, non-blocking)
+        run: |
+          {
+            echo '### npm audit (production dependencies)'
+            echo '```'
+            npm audit --omit=dev || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Integration health check
         run: |

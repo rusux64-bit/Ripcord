@@ -10,8 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# download the latest yt-dlp binary
-RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && \
+# download the pinned yt-dlp binary with checksum verification
+ARG YTDLP_VERSION=2026.10.21
+ARG YTDLP_SHA256=b7af77f686e95f7845ce8d09d21957718febb8b48b30555adb9dd2292ad7bf14
+RUN curl -L "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp" -o /usr/local/bin/yt-dlp && \
+    echo "${YTDLP_SHA256}  /usr/local/bin/yt-dlp" | sha256sum -c - && \
     chmod a+rx /usr/local/bin/yt-dlp
 
 WORKDIR /app

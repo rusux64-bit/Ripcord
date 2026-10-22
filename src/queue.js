@@ -2,6 +2,9 @@ const { DOWNLOAD_CONCURRENCY, METADATA_CONCURRENCY, MAX_QUEUED_DOWNLOADS, ENCODE
 const { Logger } = require('./logger');
 const { AppError, classifyError, sendError } = require('./errors');
 
+// open /api/progress/:id/stream responses, so shutdown can end them instead of waiting on them
+const progressStreams = new Set();
+
 class DownloadQueue {
     constructor(concurrency = DOWNLOAD_CONCURRENCY, maxQueued = MAX_QUEUED_DOWNLOADS) {
         this.concurrency = concurrency;
@@ -9,7 +12,12 @@ class DownloadQueue {
         this.running = 0;
         this.queue = [];
         this.activeEntries = new Set();
+        this.shutdownHooks = new Set();
         this.shuttingDown = false;
+    }
+
+    onShutdown(fn) {
+        if (typeof fn === 'function') this.shutdownHooks.add(fn);
     }
 
     addTask(task, res, req = null) {
@@ -63,6 +71,12 @@ class DownloadQueue {
 
     stopAccepting() {
         this.shuttingDown = true;
+        for (const hook of this.shutdownHooks) {
+            try { hook(); } catch { /* ignore */ }
+        }
+        for (const stream of progressStreams) {
+            try { stream.end(); } catch { /* already closed */ }
+        }
         while (this.queue.length > 0) {
             const entry = this.queue.shift();
             entry.res.removeListener('close', entry.onClose);
@@ -237,6 +251,27 @@ class AsyncBoundedQueue {
 const MAX_TRACKED_JOBS = 500;
 const downloadJobs = new Map();
 
+// push channel for job changes; subscribers may attach before the job exists (it is created once the task leaves the queue)
+const jobSubscribers = new Map();
+
+function subscribeJob(jobId, listener) {
+    let listeners = jobSubscribers.get(jobId);
+    if (!listeners) jobSubscribers.set(jobId, listeners = new Set());
+    listeners.add(listener);
+    return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0 && jobSubscribers.get(jobId) === listeners) jobSubscribers.delete(jobId);
+    };
+}
+
+function notifyJob(jobId) {
+    const listeners = jobId && jobSubscribers.get(jobId);
+    if (!listeners) return;
+    for (const listener of listeners) {
+        try { listener(); } catch { /* one bad subscriber must not break the job */ }
+    }
+}
+
 function computeJobSummary(job) {
     if (!job || !Array.isArray(job.tracks)) return { total: 0, ok: 0, failed: [] };
     const total = job.tracks.length;
@@ -293,6 +328,7 @@ function createJob(jobId, tracks) {
     };
     job.summary = computeJobSummary(job);
     downloadJobs.set(jobId, job);
+    notifyJob(jobId);
     return job;
 }
 
@@ -312,7 +348,17 @@ function endJob(jobId, status, errorInfo = null) {
             job.code = errorInfo.code || null;
         }
     }
+    if (status !== 'finished' && Array.isArray(job.tracks)) {
+        for (const t of job.tracks) {
+            if (t.state === 'queued' || t.state === 'matching' || t.state === 'downloading' || t.state === 'encoding') {
+                t.state = 'failed';
+                t.code = job.code || (status === 'cancelled' ? 'CANCELLED' : 'UNKNOWN');
+                t.error = job.error || (status === 'cancelled' ? 'Download was cancelled.' : 'Download failed.');
+            }
+        }
+    }
     job.summary = computeJobSummary(job);
+    notifyJob(jobId);
     setTimeout(() => { if (downloadJobs.get(jobId) === job) downloadJobs.delete(jobId); }, 2 * 60 * 1000).unref();
 }
 
@@ -332,6 +378,9 @@ module.exports = {
     AsyncBoundedQueue,
     MAX_TRACKED_JOBS,
     downloadJobs,
+    progressStreams,
+    subscribeJob,
+    notifyJob,
     computeJobSummary,
     createJob,
     endJob

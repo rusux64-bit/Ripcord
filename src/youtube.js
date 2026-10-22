@@ -15,11 +15,14 @@ const {
     YTDLP_AUTHED_CLIENTS,
     YTDLP_USE_ARIA2C,
     aria2cAvailable,
-    COOKIES_PATH
+    COOKIES_PATH,
+    SPOTIFY_SEARCH_EARLY_EXIT_SCORE,
+    SPOTIFY_PREWARM_MAX_TRACKS,
+    SPOTIFY_PREWARM_CONCURRENCY
 } = require('./config');
 const { Logger, startStage, safeMetadataText, sanitizeAsciiHeader } = require('./logger');
 const { AppError, classifyError } = require('./errors');
-const { ytdlpSemaphore } = require('./queue');
+const { ytdlpSemaphore, downloadQueue, Semaphore } = require('./queue');
 const { cookieGuard, ageRestrictedCache, AgeGateLruCache } = require('./cookies');
 const {
     downloadMetaMap,
@@ -707,20 +710,39 @@ async function findSpotifyCandidates(track, signal, logger = Logger, excludedVid
     const collectedCandidates = [];
     const seenIds = new Set();
 
-    // Execute search queries in parallel
-    const queryResults = await Promise.all(
-        queries.map(q => searchYouTubeCandidates(q, MAX_CANDIDATES_PER_QUERY, signal, logger))
-    );
+    const rankCollected = () => {
+        const ranked = rankCandidates(track, collectedCandidates, { threshold: MATCH_THRESHOLD });
 
-    // Log the first query's best score
-    if (queries.length > 0) {
-        const q1Entries = queryResults[0] || [];
-        const q1Ranked = rankCandidates(track, q1Entries, { threshold: MATCH_THRESHOLD });
-        const q1BestScore = q1Ranked[0]?.score ?? 0;
-        logger.info(`[Spotify search] First query "${sanitizeAsciiHeader(queries[0])}" best score: ${(q1BestScore * 100).toFixed(0)}%`);
-    }
+        // Filter out candidates that are known to be age-restricted or failed in this job
+        const filtered = ranked.filter(c => {
+            if (!c.videoId) return false;
+            if (excludedVideoIds && excludedVideoIds.has(c.videoId)) return false;
+            if (ageRestrictedCache.has(c.videoId)) return false;
+            return true;
+        });
 
-    for (const entries of queryResults) {
+        // Prefer auto-generated "Topic" audio uploads, then other candidates above threshold
+        filtered.sort((a, b) => {
+            const aIsTopic = a.reasons.includes('topic_channel_official') || String(a.candidate?.uploader || '').endsWith(' - Topic');
+            const bIsTopic = b.reasons.includes('topic_channel_official') || String(b.candidate?.uploader || '').endsWith(' - Topic');
+            if (aIsTopic !== bIsTopic) return aIsTopic ? -1 : 1;
+            return b.score - a.score;
+        });
+        return filtered;
+    };
+
+    // Run the queries one after another: each one is a yt-dlp process, and when the first
+    // already finds a near-certain match the second is pure CPU waste.
+    let filtered = [];
+    for (let i = 0; i < queries.length; i++) {
+        const entries = await searchYouTubeCandidates(queries[i], MAX_CANDIDATES_PER_QUERY, signal, logger);
+
+        if (i === 0) {
+            const q1Ranked = rankCandidates(track, entries, { threshold: MATCH_THRESHOLD });
+            const q1BestScore = q1Ranked[0]?.score ?? 0;
+            logger.info(`[Spotify search] First query "${sanitizeAsciiHeader(queries[0])}" best score: ${(q1BestScore * 100).toFixed(0)}%`);
+        }
+
         for (const entry of entries) {
             const id = entry?.id || entry?.url;
             if (id && !seenIds.has(id)) {
@@ -728,27 +750,86 @@ async function findSpotifyCandidates(track, signal, logger = Logger, excludedVid
                 collectedCandidates.push(entry);
             }
         }
+
+        filtered = rankCollected();
+        if (filtered[0] && filtered[0].score >= SPOTIFY_SEARCH_EARLY_EXIT_SCORE) {
+            if (i < queries.length - 1) logger.info(`[Spotify search] Strong match after query ${i + 1}, skipping ${queries.length - 1 - i} more`);
+            break;
+        }
     }
 
-    const ranked = rankCandidates(track, collectedCandidates, { threshold: MATCH_THRESHOLD });
-
-    // Filter out candidates that are known to be age-restricted or failed in this job
-    const filtered = ranked.filter(c => {
-        if (!c.videoId) return false;
-        if (excludedVideoIds && excludedVideoIds.has(c.videoId)) return false;
-        if (ageRestrictedCache.has(c.videoId)) return false;
-        return true;
-    });
-
-    // Prefer auto-generated "Topic" audio uploads, then other candidates above threshold
-    filtered.sort((a, b) => {
-        const aIsTopic = a.reasons.includes('topic_channel_official') || String(a.candidate?.uploader || '').endsWith(' - Topic');
-        const bIsTopic = b.reasons.includes('topic_channel_official') || String(b.candidate?.uploader || '').endsWith(' - Topic');
-        if (aIsTopic !== bIsTopic) return aIsTopic ? -1 : 1;
-        return b.score - a.score;
-    });
-
     return filtered;
+}
+
+// Background matching. The link is inspected well before the person taps Download, so start the
+// yt-dlp search then; by the time the download starts the match is already in the cache.
+const prewarmInflight = new Map();
+const prewarmSemaphore = new Semaphore(SPOTIFY_PREWARM_CONCURRENCY);
+const PREWARM_MAX_PENDING = 24;
+
+function spotifyTrackKey(track) {
+    return String(track?.id || track?.uri || '');
+}
+
+function prewarmSpotifyMatches(tracks, logger = Logger) {
+    if (!SPOTIFY_PREWARM_MAX_TRACKS || !Array.isArray(tracks)) return;
+    // never compete with real downloads when the server is already saturated
+    if (downloadQueue.running >= downloadQueue.concurrency) return;
+
+    for (const track of tracks.slice(0, SPOTIFY_PREWARM_MAX_TRACKS)) {
+        const key = spotifyTrackKey(track);
+        if (!key || prewarmInflight.has(key) || spotifyMatchCache.get(key)) continue;
+        if (prewarmInflight.size >= PREWARM_MAX_PENDING) break;
+
+        const controller = new AbortController();
+        const task = (async () => {
+            await prewarmSemaphore.acquire(controller.signal);
+            try {
+                const candidates = await findSpotifyCandidates(track, controller.signal, logger);
+                if (candidates[0]?.score >= 0.9) {
+                    spotifyMatchCache.set(key, candidates[0]);
+                    logger.info(`[Prewarm] Matched ${sanitizeAsciiHeader(track.title)} -> ${sanitizeAsciiHeader(candidates[0].matchedTitle || '')}`);
+                }
+            } finally {
+                prewarmSemaphore.release();
+            }
+        })()
+            .catch(err => logger.warn(`[Prewarm] Skipped ${sanitizeAsciiHeader(track?.title || '')}: ${err.message}`))
+            .finally(() => prewarmInflight.delete(key));
+        prewarmInflight.set(key, { task, controller });
+    }
+}
+
+function cancelAllPrewarms() {
+    for (const item of prewarmInflight.values()) {
+        try { item.controller.abort(); } catch { /* already aborted */ }
+    }
+    prewarmInflight.clear();
+}
+
+if (typeof downloadQueue.onShutdown === 'function') {
+    downloadQueue.onShutdown(() => cancelAllPrewarms());
+}
+
+// let a real download wait for an in-flight prewarm of the same track instead of searching twice
+async function awaitPrewarm(track, signal) {
+    const item = prewarmInflight.get(spotifyTrackKey(track));
+    if (!item) return;
+    if (signal?.aborted) {
+        item.controller.abort();
+        throw new AppError('CANCELLED');
+    }
+    await new Promise((resolve, reject) => {
+        const onAbort = () => {
+            item.controller.abort();
+            reject(new AppError('CANCELLED'));
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+        item.task.then(() => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+        });
+    });
 }
 
 async function findSpotifyMatch(track, signal, logger = Logger, excludedVideoIds = new Set()) {
@@ -1035,6 +1116,7 @@ async function downloadSpotifyAudioWithFallback({
     logger = Logger,
     jobExcludedVideoIds = new Set(),
     onNote = null,
+    onMatched = null,
     candidatesOverride = null,
     clientIp = '127.0.0.1'
 }) {
@@ -1043,6 +1125,7 @@ async function downloadSpotifyAudioWithFallback({
 
     if (!candidates || candidates.length === 0) {
         if (spotifyTrackId) {
+            await awaitPrewarm(track, signal);
             const cached = spotifyMatchCache.get(spotifyTrackId);
             if (cached && !jobExcludedVideoIds.has(cached.videoId) && !ageRestrictedCache.has(cached.videoId)) {
                 logger.info(`[Spotify match cache hit] ${sanitizeAsciiHeader(track.title)} - ${sanitizeAsciiHeader(track.artist)} -> ${sanitizeAsciiHeader(cached.matchedTitle || '')} [${cached.videoId}] (confidence ${(cached.score * 100).toFixed(0)}%)`);
@@ -1067,6 +1150,11 @@ async function downloadSpotifyAudioWithFallback({
         }
     }
 
+    if (!candidates || candidates.length === 0) {
+        throw new AppError('NO_MATCH', { userMessage: 'No search result matched the Spotify title, artist, and duration closely enough.' });
+    }
+
+    onMatched?.();
     const maxAttempts = Math.min(3, candidates.length);
     let lastError = null;
 
@@ -1589,6 +1677,9 @@ module.exports = {
     AgeGateLruCache,
     ageRestrictedCache,
     findSpotifyCandidates,
+    prewarmSpotifyMatches,
+    awaitPrewarm,
+    cancelAllPrewarms,
     findSpotifyMatch,
     getYoutubeInfo,
     getYoutubePlaylistData,

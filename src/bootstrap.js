@@ -118,13 +118,13 @@ function checkProxySanity(req) {
                 defaultSrc: ["'self'"],
                 baseUri: ["'self'"],
                 connectSrc: ["'self'"],
-                fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+                fontSrc: ["'self'"],
                 formAction: ["'self'"],
                 frameAncestors: ["'none'"],
                 imgSrc: ["'self'", 'data:'],
                 objectSrc: ["'none'"],
                 scriptSrc: ["'self'"],
-                styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+                styleSrc: ["'self'", "'unsafe-inline'"],
                 upgradeInsecureRequests: null
             }
         }

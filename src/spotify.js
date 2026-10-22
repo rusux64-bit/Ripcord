@@ -8,6 +8,7 @@ const {
     SPOTIFY_MATCH_CACHE_TTL_MS
 } = require('./config');
 const { Logger, safeMetadataText } = require('./logger');
+const { AppError } = require('./errors');
 const { Semaphore } = require('./queue');
 const { parseCoverUrl } = require('./media');
 
@@ -437,7 +438,7 @@ function parseArtists(artistString, titleString = '') {
     };
 }
 
-async function getSpotifyData(url, signal) {
+async function fetchSpotifyData(url, signal) {
     const link = spotifyLinkDetails(url);
     if (!link) throw new Error('Invalid Spotify link.');
 
@@ -446,25 +447,21 @@ async function getSpotifyData(url, signal) {
     let coverImage = '';
     let collectionName = 'Spotify Collection';
 
-    try {
-        const oembedUrl = `https://open.spotify.com/oembed?url=${encodeURIComponent(url)}&format=json`;
-        const oembedRes = await axios.get(oembedUrl, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-            timeout: 5000,
-            maxRedirects: 0,
-            maxContentLength: 1024 * 1024,
-            signal
-        });
-        if (oembedRes.status === 200 && oembedRes.data) {
-            coverImage = parseCoverUrl(oembedRes.data.thumbnail_url)?.href || '';
-            collectionName = safeMetadataText(oembedRes.data.title, collectionName);
-        }
-    } catch (e) {
+    // oEmbed (cover + name) and the embed page (track list) are independent, so fetch them together
+    const oembedUrl = `https://open.spotify.com/oembed?url=${encodeURIComponent(url)}&format=json`;
+    const oembedPromise = axios.get(oembedUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+        timeout: 5000,
+        maxRedirects: 0,
+        maxContentLength: 1024 * 1024,
+        signal
+    }).catch(e => {
         Logger.warn(`Spotify oEmbed note: ${e.message}`);
-    }
+        return null;
+    });
 
     const embedUrl = `https://open.spotify.com/embed/${type}/${id}`;
-    const response = await axios.get(embedUrl, {
+    const embedPromise = axios.get(embedUrl, {
         headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9'
@@ -474,6 +471,12 @@ async function getSpotifyData(url, signal) {
         maxContentLength: 5 * 1024 * 1024,
         signal
     });
+
+    const [oembedRes, response] = await Promise.all([oembedPromise, embedPromise]);
+    if (oembedRes && oembedRes.status === 200 && oembedRes.data) {
+        coverImage = parseCoverUrl(oembedRes.data.thumbnail_url)?.href || '';
+        collectionName = safeMetadataText(oembedRes.data.title, collectionName);
+    }
 
     const html = response.data;
     const jsonStrMatch = html.match(/<script id="__NEXT_DATA__" type="application\/json">(.*?)<\/script>/);
@@ -584,6 +587,54 @@ async function getSpotifyData(url, signal) {
     }
 
     return { type, name: collectionName, tracks, thumbnail: coverImage };
+}
+
+// The same link is inspected on /api/fetch-info and again on /api/download, so keep the result briefly
+// and share one in-flight scrape between concurrent callers.
+const SPOTIFY_DATA_TTL_MS = 5 * 60 * 1000;
+const SPOTIFY_DATA_MAX_ENTRIES = 200;
+const spotifyDataCache = new Map();
+const spotifyDataInflight = new Map();
+
+function raceWithSignal(promise, signal) {
+    promise.catch(() => { });
+    if (!signal) return promise;
+    if (signal.aborted) return Promise.reject(new AppError('CANCELLED'));
+    return new Promise((resolve, reject) => {
+        const onAbort = () => reject(new AppError('CANCELLED'));
+        signal.addEventListener('abort', onAbort, { once: true });
+        promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+    });
+}
+
+async function getSpotifyData(url, signal) {
+    const link = spotifyLinkDetails(url);
+    if (!link) throw new Error('Invalid Spotify link.');
+    const key = `${link.type}:${link.id}`;
+
+    const hit = spotifyDataCache.get(key);
+    if (hit && hit.expiresAt > Date.now()) {
+        spotifyDataCache.delete(key);
+        spotifyDataCache.set(key, hit);
+        return structuredClone(hit.data);
+    }
+    spotifyDataCache.delete(key);
+
+    let pending = spotifyDataInflight.get(key);
+    if (!pending) {
+        // the shared scrape is deliberately not tied to one caller's abort signal; axios timeouts bound it
+        pending = fetchSpotifyData(url)
+            .then(data => {
+                spotifyDataCache.set(key, { data, expiresAt: Date.now() + SPOTIFY_DATA_TTL_MS });
+                while (spotifyDataCache.size > SPOTIFY_DATA_MAX_ENTRIES) {
+                    spotifyDataCache.delete(spotifyDataCache.keys().next().value);
+                }
+                return data;
+            })
+            .finally(() => spotifyDataInflight.delete(key));
+        spotifyDataInflight.set(key, pending);
+    }
+    return structuredClone(await raceWithSignal(pending, signal));
 }
 
 module.exports = {

@@ -19,7 +19,7 @@ jobs:
     if: >-
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
       github.event_name == 'release' ||
-      github.event_name == 'workflow_dispatch'
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     permissions:
       contents: read
       packages: write
@@ -53,7 +53,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable=${{ github.event.workflow_run.head_branch == 'main' || github.ref == 'refs/heads/main' || github.event_name == 'release' }}
+            type=raw,value=latest,enable=${{ (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.conclusion == 'success') || github.event_name == 'release' }}
             type=sha,format=short,prefix=sha-
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
