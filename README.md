@@ -49,6 +49,7 @@ All configuration is optional and handled via environment variables (or `.env`).
 | `AGE_GATE_COOKIES` | `off` | Set to `on` to enable the age-restricted account pool |
 | `YTDLP_AGE_COOKIES_DIR` | (unset) | Directory with throwaway `account_*.txt` Netscape cookies |
 | `TRUST_PROXY_HOPS` | `0` | Number of reverse proxy hops to trust for client IP |
+| `STATIC_CACHE` | `on` (prod) / `off` (dev) | Enable content-fingerprinted asset URLs and long-lived cache headers |
 
 See `.env.example` for all options.
 

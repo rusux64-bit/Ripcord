@@ -57,6 +57,7 @@ services:
       MAX_PLAYLIST_TRACKS: ${MAX_PLAYLIST_TRACKS:-30}
       TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-0}
       YTDLP_AUTHED_CLIENTS: ${YTDLP_AUTHED_CLIENTS:-web_embedded,web}
+      STATIC_CACHE: ${STATIC_CACHE:-on}
       # AGE_GATE_COOKIES: "off"
       # YTDLP_AGE_COOKIES_DIR: "/app/age_cookies"
 

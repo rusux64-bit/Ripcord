@@ -49,6 +49,15 @@ function resolveCookiesPath() {
 }
 const COOKIES_PATH = resolveCookiesPath();
 
+function booleanEnv(name, fallback) {
+    const raw = process.env[name];
+    if (raw === undefined || raw === '') return fallback;
+    const lower = String(raw).toLowerCase().trim();
+    if (['1', 'true', 'on', 'yes'].includes(lower)) return true;
+    if (['0', 'false', 'off', 'no'].includes(lower)) return false;
+    throw new Error(`${name} must be a boolean (on/off, true/false, 1/0).`);
+}
+
 function positiveIntegerEnv(name, fallback, max) {
     const raw = process.env[name];
     if (raw === undefined || raw === '') return fallback;
@@ -109,6 +118,7 @@ if (!path.isAbsolute(WORK_DIR)) throw new Error('WORK_DIR must be an absolute pa
 fs.mkdirSync(WORK_DIR, { recursive: true });
 
 const PUBLIC_DIR = path.resolve(path.join(__dirname, '..', 'public'));
+const STATIC_CACHE_ENABLED = booleanEnv('STATIC_CACHE', process.env.NODE_ENV === 'production');
 const YTDLP_USE_ARIA2C = String(process.env.YTDLP_USE_ARIA2C || '').toLowerCase() === 'true';
 
 const TRUST_PROXY_HOPS_VALUE = process.env.TRUST_PROXY_HOPS === undefined || process.env.TRUST_PROXY_HOPS === ''
@@ -144,6 +154,8 @@ module.exports = {
     resolveCookiesPath,
     COOKIES_PATH,
     positiveIntegerEnv,
+    booleanEnv,
+    STATIC_CACHE_ENABLED,
     PORT,
     RATE_LIMIT_WINDOW_MS,
     API_RATE_LIMIT_MAX,

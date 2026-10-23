@@ -15,6 +15,7 @@ const { Logger } = require('./logger');
 const { AppError, classifyError, sendError } = require('./errors');
 const { downloadQueue } = require('./queue');
 const { registerRoutes } = require('./routes');
+const { setStaticHeaders, getIndexHtml } = require('./static_cache');
 
 function sweepWorkDir(staleOnly = true) {
     const staleBefore = staleOnly ? Date.now() - 6 * 60 * 60 * 1000 : Infinity;
@@ -130,8 +131,18 @@ function checkProxySanity(req) {
         }
     }));
 
+    app.get(['/', '/index.html'], (req, res) => {
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.send(getIndexHtml());
+    });
+
     // serve static files only after every API path has passed common protections
-    app.use(express.static(PUBLIC_DIR, { dotfiles: 'deny' }));
+    app.use(express.static(PUBLIC_DIR, {
+        dotfiles: 'deny',
+        index: false,
+        setHeaders: setStaticHeaders
+    }));
 
     // Mount API and frontend routes
     registerRoutes(app);

@@ -12,7 +12,6 @@ const {
     API_RATE_LIMIT_MAX,
     MAX_PLAYLIST_TRACKS,
     MAX_COVER_BYTES,
-    PUBLIC_DIR,
     SPOTIFY_SEARCH_CONCURRENCY,
     DOWNLOAD_CONCURRENCY,
     ENCODE_CONCURRENCY,
@@ -22,6 +21,7 @@ const {
 
 const { Logger, startStage, safeMetadataText, sanitizeAsciiHeader } = require('./logger');
 const { AppError, classifyError, sendError } = require('./errors');
+const { getIndexHtml } = require('./static_cache');
 const {
     AsyncBoundedQueue,
     downloadQueue,
@@ -727,7 +727,9 @@ function registerRoutes(app) {
 
     // send index.html for any other GET route
     app.get('/{*splat}', (req, res) => {
-        res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.send(getIndexHtml());
     });
 }
 
