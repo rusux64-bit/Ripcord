@@ -158,6 +158,7 @@ class AppError extends Error {
         this.retryable = overrides.retryable !== undefined ? overrides.retryable : def.retryable;
         this.action = overrides.action !== undefined ? overrides.action : (def.action || null);
         this.internalDetail = overrides.internalDetail || null;
+        this.detail = overrides.detail || null;
         this.retryAfterSeconds = overrides.retryAfterSeconds !== undefined ? overrides.retryAfterSeconds : (def.retryAfterSeconds || null);
     }
 }
@@ -285,6 +286,7 @@ function sendError(res, error, req = null) {
     const responsePayload = {
         error: appErr.userMessage,
         code: appErr.code,
+        detail: appErr.detail || null,
         requestId,
         retryable: appErr.retryable,
         action: appErr.action || null,

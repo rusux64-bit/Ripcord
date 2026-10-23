@@ -57,6 +57,7 @@ const {
     processPlaylistTrack,
     processAndStreamAudio,
     findSpotifyCandidates,
+    classifyMatch,
     prewarmSpotifyMatches,
     awaitPrewarm,
     ageRestrictedCache
@@ -146,7 +147,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                 audioFormat,
                 signal,
                 onProgress: job ? fraction => report(0, { state: 'downloading', progress: fraction }) : undefined,
-                onMatched: () => report(0, { state: 'downloading', progress: 0 }),
+                onMatched: (cand) => report(0, { state: 'downloading', progress: 0, match: classifyMatch(cand) }),
                 logger: taskLogger,
                 jobExcludedVideoIds,
                 clientIp: req?.ip || req?.socket?.remoteAddress || '127.0.0.1',
@@ -154,6 +155,9 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                     res.setHeader('X-Ripcord-Note', note);
                 }
             });
+            if (downloaded?.candidate) {
+                report(0, { match: classifyMatch(downloaded.candidate) });
+            }
             report(0, { state: 'encoding', progress: 0 });
             await processAndStreamAudio(downloaded.tempAudioPath, audioBitrate, audioFormat, track.thumbnail, res, trackTitle, track.artist, signal, req, taskLogger, true);
             report(0, { state: 'done', progress: 1 });
@@ -272,11 +276,15 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                                 const cached = spotifyMatchCache.get(spotifyTrackId);
                                 if (cached && !jobExcludedVideoIds.has(cached.videoId) && !ageRestrictedCache.has(cached.videoId)) {
                                     taskLogger.info(`[Spotify match cache hit] [track:${index + 1}] ${sanitizeAsciiHeader(track.title)} - ${sanitizeAsciiHeader(track.artist)} -> ${sanitizeAsciiHeader(cached.matchedTitle || '')} [${cached.videoId}]`);
+                                    const match = classifyMatch(cached);
+                                    report(index, { match });
                                     matchedCandidates = [{
                                         videoId: cached.videoId,
                                         score: cached.score,
                                         confidence: cached.confidence,
                                         matchedTitle: cached.matchedTitle,
+                                        uploader: cached.uploader || '',
+                                        quality: cached.quality || 'unknown',
                                         reasons: ['cached_match']
                                     }];
                                 }
@@ -284,14 +292,27 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
 
                             if (!matchedCandidates) {
                                 matchedCandidates = await findSpotifyCandidates(track, signal, taskLogger.child({ trackIndex: index }), jobExcludedVideoIds);
-                                if (matchedCandidates && matchedCandidates.length > 0 && spotifyTrackId && matchedCandidates[0]?.score >= 0.9) {
-                                    spotifyMatchCache.set(spotifyTrackId, matchedCandidates[0]);
+                                if (matchedCandidates && matchedCandidates.length > 0) {
+                                    const match = classifyMatch(matchedCandidates[0]);
+                                    report(index, { match });
+                                    if (spotifyTrackId && matchedCandidates[0]?.score >= 0.9) {
+                                        spotifyMatchCache.set(spotifyTrackId, {
+                                            ...matchedCandidates[0],
+                                            quality: match.quality,
+                                            uploader: match.uploader
+                                        });
+                                    }
                                 }
                             }
 
                             if (!matchedCandidates || matchedCandidates.length === 0) {
                                 taskLogger.warn(`[track:${index + 1}] No matching YouTube candidate found for Spotify track: ${sanitizeAsciiHeader(track.title)} - ${sanitizeAsciiHeader(track.artist)}`);
-                                report(index, { state: 'failed', error: 'No YouTube match found.' });
+                                report(index, {
+                                    state: 'failed',
+                                    code: 'NO_MATCH',
+                                    error: 'No YouTube match found.',
+                                    detail: null
+                                });
                                 continue;
                             }
 

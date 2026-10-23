@@ -804,23 +804,56 @@ const ERROR_MESSAGES = {
     }
 };
 
-function formatTrackFailure(code, error) {
+function formatBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    const val = bytes / Math.pow(1024, i);
+    const rounded = (val >= 10 || val % 1 === 0) ? Math.round(val) : Number(val.toFixed(1));
+    return `${rounded} ${units[i]}`;
+}
+
+function formatTrackFailure(code, error, detail) {
     switch (code) {
-        case 'AGE_RESTRICTED': return 'Age restricted';
-        case 'NO_MATCH': return 'No match found';
-        case 'RATE_LIMITED': return 'Rate limited';
-        case 'LOGIN_REQUIRED': return 'Bot check / login required';
-        case 'PRIVATE_OR_UNAVAILABLE': return 'Unavailable';
-        case 'REGION_BLOCKED': return 'Region blocked';
-        case 'MEMBERS_ONLY': return 'Members only';
-        case 'LIVE_NOT_SUPPORTED': return 'Live stream';
-        case 'TOO_LARGE': return 'Too large';
-        case 'ARCHIVE_LIMIT': return error || 'Archive limit reached';
-        case 'TOO_LONG': return 'Too long';
-        case 'UNSUPPORTED_FORMAT': return 'Format error';
-        case 'ENCODE_FAILED': return 'Encode failed';
-        case 'NETWORK_TIMEOUT': return 'Network timeout';
-        case 'TIMEOUT': return 'Timed out';
+        case 'AGE_RESTRICTED': {
+            if (detail?.reason === 'no_account') return 'Age-restricted: no authenticated account available.';
+            if (detail?.reason === 'circuit_open') return 'Age-restricted: account protection active. Try again later.';
+            if (detail?.reason === 'budget_exhausted') return 'Age-restricted: daily account budget reached.';
+            if (detail?.reason === 'rejected') return 'Age-restricted: account access was rejected.';
+            return error || 'Age-restricted: no authenticated account available.';
+        }
+        case 'REGION_BLOCKED': return "Not available in this server's region.";
+        case 'TOO_LARGE': {
+            if (detail?.limitBytes && detail?.actualBytes) {
+                return `Audio exceeds the ${formatBytes(detail.limitBytes)} limit (this one: ${formatBytes(detail.actualBytes)})`;
+            }
+            if (detail?.limitBytes) {
+                return `Audio exceeds the ${formatBytes(detail.limitBytes)} limit.`;
+            }
+            return error || 'Audio exceeds the maximum allowed size limit.';
+        }
+        case 'TOO_LONG': {
+            if (detail?.limitSeconds) {
+                const mins = Math.round(detail.limitSeconds / 60);
+                return `Duration exceeds the ${mins} min limit.`;
+            }
+            return error || 'Duration exceeds the maximum allowed limit.';
+        }
+        case 'NO_MATCH': {
+            if (detail?.bestScore != null) {
+                return `No confident YouTube match (best candidate scored ${Math.round(detail.bestScore * 100)}%)`;
+            }
+            return error || 'No confident YouTube match found.';
+        }
+        case 'TIMEOUT': return 'Processing timed out. Retrying may help.';
+        case 'RATE_LIMITED': return 'Server or YouTube is busy. Please try again in a few minutes.';
+        case 'LOGIN_REQUIRED': return 'YouTube requires sign-in or bot check. Retrying later may help.';
+        case 'ARCHIVE_LIMIT': return error || 'Skipped: archive size limit reached.';
+        case 'NETWORK_TIMEOUT': return 'Network connection timed out. Retrying may help.';
+        case 'ENCODE_FAILED': return 'Audio conversion failed. Try a different audio format.';
+        case 'PRIVATE_OR_UNAVAILABLE': return 'This media is private, removed, or unavailable.';
+        case 'MEMBERS_ONLY': return 'Only available to YouTube channel members.';
+        case 'LIVE_NOT_SUPPORTED': return 'Live streams cannot be downloaded until broadcast ends.';
         default: return error || code || 'Skipped';
     }
 }
@@ -1666,9 +1699,11 @@ function updateTrackRow(row, track) {
     const info = TRACK_STATES[track.state] || TRACK_STATES.queued;
     const pct = Math.round((Number(track.progress) || 0) * 100);
     const determinate = track.state === 'downloading' && pct > 0;
-    const failureReason = track.state === 'failed' ? formatTrackFailure(track.code, track.error) : '';
+    const failureReason = track.state === 'failed' ? formatTrackFailure(track.code, track.error, track.detail) : '';
     const note = track.note || '';
-    const key = `${track.state}:${determinate ? pct : ''}:${failureReason}:${note}`;
+    const match = track.match;
+    const matchQuality = match?.quality || '';
+    const key = `${track.state}:${determinate ? pct : ''}:${failureReason}:${note}:${matchQuality}`;
     if (row.key === key) return;
     row.key = key;
     row.li.dataset.state = track.state in TRACK_STATES ? track.state : 'queued';
@@ -1682,6 +1717,48 @@ function updateTrackRow(row, track) {
             sub.append(' · ', noteBadge);
         } else if (row.text) {
             row.text.append(noteBadge);
+        }
+    }
+
+    if (match && match.quality && match.quality !== 'unknown' && !row.li.querySelector('.track__match')) {
+        const qualityLabels = {
+            official: 'Official audio',
+            good: 'Close match',
+            approximate: 'Approximate: check it'
+        };
+        const qualityIcons = {
+            official: 'verified',
+            good: 'check_circle',
+            approximate: 'help_outline'
+        };
+        const badgeText = qualityLabels[match.quality] || match.quality;
+        const badgeIcon = qualityIcons[match.quality] || 'info';
+
+        const matchBadge = document.createElement('span');
+        matchBadge.className = `track__match track__match--${match.quality}`;
+
+        const iconSpan = document.createElement('span');
+        iconSpan.className = 'track__match-icon icon';
+        iconSpan.setAttribute('aria-hidden', 'true');
+        iconSpan.textContent = badgeIcon;
+
+        const textSpan = document.createElement('span');
+        textSpan.className = 'track__match-text';
+        textSpan.textContent = badgeText;
+
+        matchBadge.append(iconSpan, textSpan);
+
+        const titleText = match.title ? `"${match.title}"` : '';
+        const byText = match.uploader ? ` by ${match.uploader}` : '';
+        const tooltip = `Matched: ${titleText}${byText}`;
+        matchBadge.title = tooltip;
+        matchBadge.setAttribute('aria-label', `${badgeText}: ${tooltip}`);
+
+        const sub = row.text ? row.text.querySelector('.track__sub') : null;
+        if (sub) {
+            sub.append(' · ', matchBadge);
+        } else if (row.text) {
+            row.text.append(matchBadge);
         }
     }
 
@@ -1854,11 +1931,18 @@ function fail(err) {
     showErrorBanner('options', err, () => startDownload());
 }
 
-function updateSkippedToggleLabel(failedCount, isExpanded) {
-    const count = Number.isSafeInteger(failedCount) && failedCount > 0 ? failedCount : 1;
-    const noun = count === 1 ? '1 track' : `${count} tracks`;
-    const action = isExpanded ? '(click to hide)' : '(click to see why)';
-    el.doneSkippedToggleText.textContent = `${noun} could not be downloaded ${action}`;
+function updateSkippedToggleLabel(failedCount, isExpanded, approxCount = 0) {
+    const action = isExpanded ? '(click to hide)' : '(click to review)';
+    if (failedCount > 0 && approxCount > 0) {
+        el.doneSkippedToggleText.textContent = `${failedCount} skipped, ${approxCount} approximate ${action}`;
+    } else if (approxCount > 0) {
+        const noun = approxCount === 1 ? '1 track' : `${approxCount} tracks`;
+        el.doneSkippedToggleText.textContent = `${noun} matched approximately ${action}`;
+    } else {
+        const count = Number.isSafeInteger(failedCount) && failedCount > 0 ? failedCount : 1;
+        const noun = count === 1 ? '1 track' : `${count} tracks`;
+        el.doneSkippedToggleText.textContent = `${noun} could not be downloaded ${isExpanded ? '(click to hide)' : '(click to see why)'}`;
+    }
 }
 
 function finish(isCollection) {
@@ -1872,27 +1956,41 @@ function finish(isCollection) {
                 title: t.title,
                 artist: t.artist,
                 code: t.code,
-                error: t.error
+                error: t.error,
+                detail: t.detail || null
             }))
         };
         const total = summary.total;
+        const allTracks = Array.isArray(state.lastJob.tracks) ? state.lastJob.tracks : [];
+        const approxTracks = allTracks.filter(t => t.state === 'done' && t.match && t.match.quality === 'approximate');
+        const approxCount = approxTracks.length;
         const failedTracks = Array.isArray(summary.failed) ? summary.failed : [];
         const failedCount = failedTracks.length;
         // Invariant: ready + skipped === total
         const readyCount = Math.max(0, total - failedCount);
 
-        if (failedCount > 0) {
-            el.doneTitle.textContent = `${readyCount} of ${total} ready, ${failedCount} skipped`;
+        if (failedCount > 0 || approxCount > 0) {
+            if (failedCount > 0) {
+                el.doneTitle.textContent = `${readyCount} of ${total} ready, ${failedCount} skipped`;
+            } else {
+                el.doneTitle.textContent = 'All done. Enjoy!';
+            }
+
             const archiveLimitCount = failedTracks.filter(t => t.code === 'ARCHIVE_LIMIT').length;
             if (archiveLimitCount > 0) {
                 el.doneSub.textContent = `${archiveLimitCount} track${archiveLimitCount === 1 ? '' : 's'} left out due to archive size cap. Try splitting the playlist into smaller batches.`;
+            } else if (approxCount > 0 && failedCount === 0) {
+                el.doneSub.textContent = `${approxCount} track${approxCount === 1 ? '' : 's'} matched approximately — check them below if needed.`;
+            } else if (approxCount > 0) {
+                el.doneSub.textContent = `${failedCount} skipped, ${approxCount} matched approximately. Your ZIP should be in your downloads folder.`;
             } else {
                 el.doneSub.textContent = 'Your ZIP should be in your downloads folder.';
             }
+
             el.doneSkipped.hidden = false;
             el.doneSkippedPanel.hidden = true;
             el.doneSkippedToggle.setAttribute('aria-expanded', 'false');
-            updateSkippedToggleLabel(failedCount, false);
+            updateSkippedToggleLabel(failedCount, false, approxCount);
             el.doneSkippedList.replaceChildren();
 
             failedTracks.forEach(t => {
@@ -1903,7 +2001,21 @@ function finish(isCollection) {
                 titleSpan.textContent = `${t.title || 'Track'}${t.artist ? ` - ${t.artist}` : ''}`;
                 const reasonSpan = document.createElement('span');
                 reasonSpan.className = 'done-skipped__reason';
-                reasonSpan.textContent = formatTrackFailure(t.code, t.error);
+                reasonSpan.textContent = formatTrackFailure(t.code, t.error, t.detail);
+                li.append(titleSpan, reasonSpan);
+                el.doneSkippedList.append(li);
+            });
+
+            approxTracks.forEach(t => {
+                const li = document.createElement('li');
+                li.className = 'done-skipped__item done-skipped__item--approx';
+                const titleSpan = document.createElement('span');
+                titleSpan.className = 'done-skipped__title';
+                titleSpan.textContent = `${t.title || 'Track'}${t.artist ? ` - ${t.artist}` : ''}`;
+                const reasonSpan = document.createElement('span');
+                reasonSpan.className = 'done-skipped__reason';
+                const m = t.match;
+                reasonSpan.textContent = `Approximate: matched to "${m?.title || 'YouTube video'}"${m?.uploader ? ` (${m.uploader})` : ''}`;
                 li.append(titleSpan, reasonSpan);
                 el.doneSkippedList.append(li);
             });
@@ -1914,7 +2026,13 @@ function finish(isCollection) {
         }
     } else {
         el.doneTitle.textContent = 'All done. Enjoy!';
-        el.doneSub.textContent = 'Your file should be in your downloads folder.';
+        const match = state.lastJob?.tracks?.[0]?.match;
+        if (match && match.title) {
+            const qualityLabel = match.quality === 'official' ? 'official upload' : (match.quality === 'good' ? 'close match' : 'approximate');
+            el.doneSub.textContent = `Matched to: ${match.title}${match.uploader ? ` (${match.uploader})` : ''}, ${qualityLabel}`;
+        } else {
+            el.doneSub.textContent = 'Your file should be in your downloads folder.';
+        }
         el.doneSkipped.hidden = true;
     }
     go('done', 'forward');
@@ -1941,8 +2059,10 @@ el.doneSkippedToggle.addEventListener('click', () => {
     const willOpen = isHidden;
     el.doneSkippedPanel.hidden = !willOpen;
     el.doneSkippedToggle.setAttribute('aria-expanded', String(willOpen));
-    const failedCount = (state.lastJob?.summary?.failed || []).length || (state.lastJob?.tracks || []).filter(t => t.state === 'failed').length || 1;
-    updateSkippedToggleLabel(failedCount, willOpen);
+    const failedCount = (state.lastJob?.summary?.failed || []).length || (state.lastJob?.tracks || []).filter(t => t.state === 'failed').length || 0;
+    const allTracks = Array.isArray(state.lastJob?.tracks) ? state.lastJob.tracks : [];
+    const approxCount = allTracks.filter(t => t.state === 'done' && t.match && t.match.quality === 'approximate').length;
+    updateSkippedToggleLabel(failedCount, willOpen, approxCount);
     logClientEvent('action', willOpen ? 'Expanded skipped tracks' : 'Collapsed skipped tracks');
 });
 

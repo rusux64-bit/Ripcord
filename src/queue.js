@@ -287,7 +287,9 @@ function computeJobSummary(job) {
                 title: t.title || 'Unknown Track',
                 artist: t.artist || '',
                 code: t.code || 'UNKNOWN',
-                error: t.error || 'Track could not be downloaded.'
+                error: t.error || 'Track could not be downloaded.',
+                detail: t.detail || null,
+                match: t.match || null
             });
         }
     });
@@ -300,7 +302,9 @@ function computeJobSummary(job) {
                     title: t.title || 'Unknown Track',
                     artist: t.artist || '',
                     code: t.code || 'UNKNOWN',
-                    error: t.error || 'Track could not be processed.'
+                    error: t.error || 'Track could not be processed.',
+                    detail: t.detail || null,
+                    match: t.match || null
                 });
             }
         });
@@ -310,6 +314,19 @@ function computeJobSummary(job) {
     return { total, ok, failed };
 }
 
+/**
+ * Shared job payload shape:
+ * {
+ *   status: 'queued' | 'running' | 'finished' | 'failed' | 'cancelled',
+ *   queue?: { position, total, concurrency, etaSeconds | null },
+ *   tracks: [{
+ *     title, artist, state, progress, code, error,
+ *     detail?: { ... },
+ *     match?:  { quality, score, title, uploader }
+ *   }],
+ *   summary: { total, ok, failed: [...] }
+ * }
+ */
 function createJob(jobId, tracks) {
     if (!jobId) return null;
     if (downloadJobs.size >= MAX_TRACKED_JOBS) downloadJobs.delete(downloadJobs.keys().next().value);
@@ -323,7 +340,9 @@ function createJob(jobId, tracks) {
             state: 'queued',
             progress: 0,
             code: null,
-            error: null
+            error: null,
+            detail: null,
+            match: null
         }))
     };
     job.summary = computeJobSummary(job);
@@ -354,6 +373,7 @@ function endJob(jobId, status, errorInfo = null) {
                 t.state = 'failed';
                 t.code = job.code || (status === 'cancelled' ? 'CANCELLED' : 'UNKNOWN');
                 t.error = job.error || (status === 'cancelled' ? 'Download was cancelled.' : 'Download failed.');
+                if (!t.detail && errorInfo?.detail) t.detail = errorInfo.detail;
             }
         }
     }

@@ -2176,6 +2176,40 @@ body[data-stage="working"] .media {
   vertical-align: middle;
 }
 
+.track__match {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  line-height: 1.1;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface-variant);
+  letter-spacing: 0.02em;
+  vertical-align: middle;
+}
+
+.track__match-icon {
+  font-size: 0.75rem !important;
+}
+
+.track__match--official {
+  background: rgba(46, 125, 50, 0.15);
+  color: #2e7d32;
+}
+
+.track__match--good {
+  background: rgba(2, 119, 189, 0.15);
+  color: #0277bd;
+}
+
+.track__match--approximate {
+  background: rgba(239, 108, 0, 0.15);
+  color: #ef6c00;
+}
+
 .track__status {
   display: flex;
   align-items: center;

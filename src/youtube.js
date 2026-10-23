@@ -626,6 +626,59 @@ function rankCandidates(track, candidates, options = {}) {
     return evaluated;
 }
 
+function classifyMatch(candidate) {
+    if (!candidate || typeof candidate !== 'object') {
+        return { quality: 'unknown', score: null, title: '', uploader: '' };
+    }
+
+    const rawTitle = candidate.matchedTitle || candidate.title || candidate.rawTitle || candidate.candidate?.title || '';
+    const rawUploader = candidate.uploader || candidate.channel || candidate.matchedArtist || candidate.candidate?.uploader || candidate.candidate?.channel || '';
+    const title = safeMetadataText(rawTitle, '');
+    const uploader = safeMetadataText(rawUploader, '');
+    const score = typeof candidate.score === 'number'
+        ? Math.round(candidate.score * 1000) / 1000
+        : (typeof candidate.confidence === 'number' ? Math.round(candidate.confidence * 1000) / 1000 : null);
+
+    if (candidate.quality && ['official', 'good', 'approximate', 'unknown'].includes(candidate.quality)) {
+        return { quality: candidate.quality, score, title, uploader };
+    }
+
+    const reasons = Array.isArray(candidate.reasons) ? candidate.reasons : null;
+    if (!reasons) {
+        return { quality: 'unknown', score, title, uploader };
+    }
+
+    const hasApproximateSignal = reasons.some(r =>
+        typeof r === 'string' && (
+            r.startsWith('missing_') ||
+            r.startsWith('conflicting_') ||
+            r.startsWith('unwanted_') ||
+            r.startsWith('penalty_') ||
+            r.includes('conflict')
+        )
+    ) || (score !== null && score < 0.9);
+
+    if (hasApproximateSignal) {
+        return { quality: 'approximate', score, title, uploader };
+    }
+
+    const isTopic = reasons.includes('topic_channel_official') ||
+        uploader.toLowerCase().endsWith(' - topic') ||
+        Boolean(candidate.isTopicChannel);
+    const isOfficialArtist = reasons.includes('official_artist_channel') ||
+        reasons.includes('vevo_channel');
+
+    if (isTopic || isOfficialArtist) {
+        return { quality: 'official', score, title, uploader };
+    }
+
+    if (score !== null && score >= 0.9) {
+        return { quality: 'good', score, title, uploader };
+    }
+
+    return { quality: 'approximate', score, title, uploader };
+}
+
 function killProcessGroup(proc, signal = 'SIGKILL') {
     if (!proc || !proc.pid) return;
     try {
@@ -1176,7 +1229,7 @@ async function downloadSpotifyAudioWithFallback({
         throw new AppError('NO_MATCH', { userMessage: 'No search result matched the Spotify title, artist, and duration closely enough.' });
     }
 
-    onMatched?.();
+    onMatched?.(candidates[0]);
     const maxAttempts = Math.min(3, candidates.length);
     let lastError = null;
 
@@ -1364,7 +1417,14 @@ async function downloadPlaylistTrack(track, index, audioBitrate, audioFormat, si
                             signal,
                             logger: trackLogger
                         });
-                        if (guardResult.status !== 'allow') throw err;
+                        if (guardResult.status !== 'allow') {
+                            const reason = guardResult.reason === 'CIRCUIT_BREAKER_OPEN'
+                                ? 'circuit_open'
+                                : (guardResult.reason && (guardResult.reason.includes('LIMIT') || guardResult.reason.includes('BUDGET') || guardResult.reason.includes('COOLDOWN'))
+                                    ? 'budget_exhausted'
+                                    : 'no_account');
+                            throw new AppError('AGE_RESTRICTED', { detail: { reason } });
+                        }
                         if (guardResult.fromCache && guardResult.tempAudioPath) {
                             tempAudioPath = guardResult.tempAudioPath;
                             tempFiles.push(tempAudioPath);
@@ -1376,10 +1436,10 @@ async function downloadPlaylistTrack(track, index, audioBitrate, audioFormat, si
                                 guardResult.release(true, null, tempAudioPath);
                             } catch (cookieErr) {
                                 guardResult.release(false, cookieErr);
-                                throw cookieErr;
+                                throw new AppError('AGE_RESTRICTED', { detail: { reason: 'rejected' } });
                             }
                         } else {
-                            throw err;
+                            throw new AppError('AGE_RESTRICTED', { detail: { reason: 'no_account' } });
                         }
                     } else if (COOKIES_PATH) {
                         trackLogger.info('Track is age-restricted, retrying with fallback cookies');
@@ -1387,7 +1447,7 @@ async function downloadPlaylistTrack(track, index, audioBitrate, audioFormat, si
                             fraction => report(index, { state: 'downloading', progress: fraction }), trackLogger, COOKIES_PATH);
                         tempFiles.push(tempAudioPath);
                     } else {
-                        throw err;
+                        throw new AppError('AGE_RESTRICTED', { detail: { reason: 'no_account' } });
                     }
                 } else {
                     throw err;
@@ -1465,7 +1525,7 @@ async function downloadPlaylistTrack(track, index, audioBitrate, audioFormat, si
         } else {
             trackLogger.error(`Track failed: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - [${appErr.code}] ${appErr.message}`);
         }
-        report(index, { state: 'failed', progress: 1, error: appErr.userMessage, code: appErr.code });
+        report(index, { state: 'failed', progress: 1, error: appErr.userMessage, code: appErr.code, detail: appErr.detail || null });
         cleanupFiles(tempFiles);
         return null;
     }
@@ -1499,13 +1559,26 @@ async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, r
         const args = ffmpegEncodeArgs(tempAudioPath, tempOutPath, audioFormat, audioBitrate, tempImgPath, title, artist, zipTrackLimit(audioFormat), copyAudio);
         await runFfmpeg(args, 'Track encoding timed out.', signal, trackLogger);
         if (signal?.aborted) throw new AppError('CANCELLED');
-        if (fs.statSync(tempOutPath).size >= zipTrackLimit(audioFormat)) throw new AppError('TOO_LARGE', { userMessage: 'Playlist track exceeds the allowed size.' });
+        const postEncodeSize = fs.statSync(tempOutPath).size;
+        const trackLimit = zipTrackLimit(audioFormat);
+        if (postEncodeSize >= trackLimit) {
+            throw new AppError('TOO_LARGE', {
+                userMessage: 'Playlist track exceeds the allowed size.',
+                detail: { limitBytes: trackLimit, actualBytes: postEncodeSize }
+            });
+        }
 
         if (tempImgPath && fs.existsSync(tempOutPath) && audioFormat === 'ogg') {
             await injectVorbisCoverArt(tempOutPath, tempImgPath, audioFormat, trackLogger);
         }
 
-        if (fs.statSync(tempOutPath).size > zipTrackLimit(audioFormat)) throw new AppError('TOO_LARGE', { userMessage: 'Playlist track exceeds the allowed size.' });
+        const finalSize = fs.statSync(tempOutPath).size;
+        if (finalSize > trackLimit) {
+            throw new AppError('TOO_LARGE', {
+                userMessage: 'Playlist track exceeds the allowed size.',
+                detail: { limitBytes: trackLimit, actualBytes: finalSize }
+            });
+        }
         const safeName = sanitizeFilename(`${String(index + 1).padStart(2, '0')} - ${title} - ${artist}.${audioFormat}`);
 
         cleanupFiles(tempFiles.filter(file => file !== tempOutPath));
@@ -1519,7 +1592,7 @@ async function processPlaylistTrack(source, audioBitrate, audioFormat, signal, r
         } else {
             trackLogger.error(`Track encode failed: ${sanitizeAsciiHeader(String(track.title || 'Unknown Track'))} - [${appErr.code}] ${appErr.message}`);
         }
-        report(index, { state: 'failed', progress: 1, error: appErr.userMessage, code: appErr.code });
+        report(index, { state: 'failed', progress: 1, error: appErr.userMessage, code: appErr.code, detail: appErr.detail || null });
         cleanupFiles(tempFiles);
         return null;
     }
@@ -1695,6 +1768,7 @@ module.exports = {
     scoreArtist,
     evaluateVersionCompatibility,
     scoreSpotifyCandidate,
+    classifyMatch,
     generateSearchQueries,
     rankCandidates,
     killProcessGroup,

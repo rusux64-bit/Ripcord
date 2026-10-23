@@ -134,6 +134,8 @@ class SpotifyMatchCache {
                         this.cache.set(key, {
                             videoId: entry.videoId,
                             matchedTitle: entry.matchedTitle || '',
+                            uploader: entry.uploader || entry.matchedArtist || '',
+                            quality: entry.quality || 'unknown',
                             score: entry.score || entry.confidence || 0.9,
                             confidence: entry.confidence || entry.score || 0.9,
                             expiresAt: entry.expiresAt || (now + this.ttlMs)
@@ -177,6 +179,8 @@ class SpotifyMatchCache {
         this.cache.set(norm, {
             videoId: matchData.videoId,
             matchedTitle: matchData.matchedTitle || '',
+            uploader: matchData.uploader || matchData.matchedArtist || '',
+            quality: matchData.quality || 'unknown',
             score: matchData.score ?? confidence,
             confidence: confidence,
             expiresAt: Date.now() + this.ttlMs
