@@ -9,7 +9,9 @@ const {
     TRUST_PROXY_HOPS,
     PUBLIC_DIR,
     WORK_DIR,
-    COOKIES_PATH
+    COOKIES_PATH,
+    MAX_PLAYLIST_ARCHIVE_BYTES,
+    MAX_AUDIO_OUTPUT_BYTES
 } = require('./config');
 const { Logger } = require('./logger');
 const { AppError, classifyError, sendError } = require('./errors');
@@ -44,6 +46,10 @@ const cleanupStaleWorkFiles = () => sweepWorkDir(true);
 
 if (COOKIES_PATH) {
     Logger.warn(`DEPRECATION WARNING: YTDLP_COOKIES_PATH (${COOKIES_PATH}) is deprecated and will be removed in a future release. Use AGE_GATE_COOKIES=on with YTDLP_AGE_COOKIES_DIR instead. Cookies are now scoped strictly to age-gate retries.`);
+}
+
+if (MAX_PLAYLIST_ARCHIVE_BYTES < MAX_AUDIO_OUTPUT_BYTES) {
+    Logger.warn(`MAX_PLAYLIST_ARCHIVE_BYTES (${MAX_PLAYLIST_ARCHIVE_BYTES}) is smaller than single-track lossless limit MAX_AUDIO_OUTPUT_BYTES (${MAX_AUDIO_OUTPUT_BYTES}). Lossless tracks may exceed the archive cap.`);
 }
 
 cleanupStaleWorkFiles();

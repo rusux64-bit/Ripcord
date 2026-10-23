@@ -16,7 +16,9 @@ const {
     DOWNLOAD_CONCURRENCY,
     ENCODE_CONCURRENCY,
     JOB_ID_PATTERN,
-    ffmpegPath
+    ffmpegPath,
+    MAX_PLAYLIST_ARCHIVE_BYTES,
+    formatBytes
 } = require('./config');
 
 const { Logger, startStage, safeMetadataText, sanitizeAsciiHeader } = require('./logger');
@@ -211,7 +213,31 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
 
             const tracks = collectionData.tracks.slice(0, MAX_PLAYLIST_TRACKS);
             let addedTracks = 0;
+            let archiveBytes = 0;
+            let archiveFull = false;
+            const skippedDueToArchiveLimit = [];
+            const archiveCapFormatted = formatBytes(MAX_PLAYLIST_ARCHIVE_BYTES);
             job = createJob(jobId, tracks);
+
+            const markRemainingSkipped = () => {
+                for (let i = 0; i < tracks.length; i++) {
+                    const t = job?.tracks[i];
+                    if (t && t.state !== 'done' && t.state !== 'failed') {
+                        report(i, {
+                            state: 'failed',
+                            code: 'ARCHIVE_LIMIT',
+                            error: `Skipped: archive size limit (${archiveCapFormatted}) reached`
+                        });
+                        if (!skippedDueToArchiveLimit.some(s => s.index === i)) {
+                            skippedDueToArchiveLimit.push({
+                                index: i,
+                                title: tracks[i]?.title,
+                                artist: tracks[i]?.artist
+                            });
+                        }
+                    }
+                }
+            };
 
             try {
                 const searchCapacity = Math.max(8, SPOTIFY_SEARCH_CONCURRENCY * 2);
@@ -222,9 +248,9 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                 const isSpotifyCollection = spotifyLink && spotifyLink.type !== 'track';
 
                 const searchWorker = async () => {
-                    while (!signal.aborted) {
+                    while (!signal.aborted && !archiveFull) {
                         const index = nextSearchTrack++;
-                        if (index >= tracks.length) return;
+                        if (index >= tracks.length || archiveFull) return;
                         const track = tracks[index];
                         report(index, { state: 'matching', progress: 0 });
 
@@ -287,13 +313,17 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                 };
 
                 const downloadWorker = async () => {
-                    while (!signal.aborted) {
+                    while (!signal.aborted && !archiveFull) {
                         const item = await searchHandoffQueue.shift();
-                        if (!item) return;
+                        if (!item || archiveFull) return;
                         const { track, index } = item;
                         const clientIp = req?.ip || req?.socket?.remoteAddress || '127.0.0.1';
                         const downloaded = await downloadPlaylistTrack(track, index, audioBitrate, audioFormat, signal, report, taskLogger, jobExcludedVideoIds, clientIp);
                         if (!downloaded) continue;
+                        if (archiveFull) {
+                            cleanupFiles([downloaded.tempAudioPath, downloaded.tempImgPath]);
+                            return;
+                        }
                         try {
                             await encodeHandoffQueue.push(downloaded);
                         } catch {
@@ -304,19 +334,59 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                 };
 
                 const encodeWorker = async () => {
-                    while (!signal.aborted) {
+                    while (!signal.aborted && !archiveFull) {
                         const downloaded = await encodeHandoffQueue.shift();
                         if (!downloaded) return;
+                        if (archiveFull) {
+                            cleanupFiles([downloaded.tempAudioPath, downloaded.tempImgPath]);
+                            return;
+                        }
                         const result = await processPlaylistTrack(downloaded, audioBitrate, audioFormat, signal, report, taskLogger, job);
                         if (signal.aborted) {
                             if (result?.filePath) cleanupFiles([result.filePath]);
                             return;
                         }
                         if (result?.filePath) {
-                            trackFilePaths.add(result.filePath);
-                            archiveFilePaths.set(result.name, result.filePath);
-                            archive.file(result.filePath, { name: result.name });
-                            addedTracks++;
+                            let stat = null;
+                            try {
+                                stat = fs.statSync(result.filePath);
+                            } catch {
+                                cleanupFiles([result.filePath]);
+                                report(downloaded.index, { state: 'failed', error: 'File read error.' });
+                                continue;
+                            }
+
+                            // Synchronous decision in the same event tick
+                            if (archiveBytes + stat.size > MAX_PLAYLIST_ARCHIVE_BYTES) {
+                                archiveFull = true;
+                                cleanupFiles([result.filePath]);
+                                taskLogger.warn(`[Archive] Aggregate playlist limit reached (${archiveCapFormatted}). Skipping track ${downloaded.index + 1}: ${result.name}`);
+                                report(downloaded.index, {
+                                    state: 'failed',
+                                    code: 'ARCHIVE_LIMIT',
+                                    error: `Skipped: archive size limit (${archiveCapFormatted}) reached`
+                                });
+                                if (!skippedDueToArchiveLimit.some(s => s.index === downloaded.index)) {
+                                    skippedDueToArchiveLimit.push({
+                                        index: downloaded.index,
+                                        title: tracks[downloaded.index]?.title,
+                                        artist: tracks[downloaded.index]?.artist
+                                    });
+                                }
+                                markRemainingSkipped();
+                                searchHandoffQueue.close();
+                                encodeHandoffQueue.close();
+                                while (encodeHandoffQueue.items.length > 0) {
+                                    const d = encodeHandoffQueue.items.shift();
+                                    if (d) cleanupFiles([d.tempAudioPath, d.tempImgPath]);
+                                }
+                            } else {
+                                archiveBytes += stat.size;
+                                trackFilePaths.add(result.filePath);
+                                archiveFilePaths.set(result.name, result.filePath);
+                                archive.file(result.filePath, { name: result.name });
+                                addedTracks++;
+                            }
                         }
                     }
                 };
@@ -336,9 +406,32 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
 
                 if (signal.aborted) throw new AppError('CANCELLED');
                 if (addedTracks === 0) {
+                    if (archiveFull) {
+                        const limitErr = new AppError('ARCHIVE_LIMIT', {
+                            userMessage: `Archive size limit (${archiveCapFormatted}) reached before any tracks could be added.`
+                        });
+                        endJob(jobId, 'failed', limitErr);
+                        throw limitErr;
+                    }
                     const noMatchErr = new AppError('NO_MATCH', { userMessage: 'No tracks could be processed.' });
                     endJob(jobId, 'failed', noMatchErr);
                     throw noMatchErr;
+                }
+
+                if (skippedDueToArchiveLimit.length > 0) {
+                    const lines = [
+                        'Ripcord - Skipped Tracks Report',
+                        '================================',
+                        `Archive size limit: ${archiveCapFormatted}`,
+                        `Tracks included: ${addedTracks}`,
+                        `Tracks skipped: ${skippedDueToArchiveLimit.length}`,
+                        '',
+                        'Skipped Tracks:'
+                    ];
+                    skippedDueToArchiveLimit.forEach((st, idx) => {
+                        lines.push(`${idx + 1}. ${st.artist ? `${st.artist} - ` : ''}${st.title || 'Unknown Track'} (${archiveCapFormatted} limit reached)`);
+                    });
+                    archive.append(lines.join('\n') + '\n', { name: '_ripcord-skipped.txt' });
                 }
 
                 const zipTimer = startStage(taskLogger, 'zip');
@@ -346,7 +439,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
                 zipTimer.end('ok');
 
                 endJob(jobId, 'finished');
-                taskLogger.success(`Archive completed: ${zipBase}`);
+                taskLogger.success(`Archive completed: ${zipBase} (${addedTracks} tracks, ${formatBytes(archiveBytes)})`);
             } catch (jobErr) {
                 const appErr = classifyError(jobErr, jobErr?.stderr || '');
                 if (job?.status === 'running') endJob(jobId, signal.aborted ? 'cancelled' : 'failed', appErr);

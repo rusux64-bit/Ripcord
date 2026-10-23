@@ -89,6 +89,12 @@ const ERROR_DEFINITIONS = {
         retryable: false,
         action: null
     },
+    ARCHIVE_LIMIT: {
+        httpStatus: 413,
+        userMessage: 'The aggregate playlist archive exceeds the maximum allowed size limit.',
+        retryable: false,
+        action: null
+    },
     TOO_LONG: {
         httpStatus: 413,
         userMessage: 'The media duration exceeds the maximum allowed limit.',
@@ -192,6 +198,10 @@ const CLASSIFIER_RULES = [
     {
         code: 'TOO_LARGE',
         test: (combined) => /file is larger than max-filesize|max-filesize|exceeds the allowed size|file size exceeds|audio output exceeds the allowed size|playlist track exceeds the allowed size|cover image exceeds size limit/i.test(combined)
+    },
+    {
+        code: 'ARCHIVE_LIMIT',
+        test: (combined) => /archive size limit|aggregate playlist archive|archive limit reached/i.test(combined)
     },
     {
         code: 'TOO_LONG',

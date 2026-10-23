@@ -46,6 +46,7 @@ All configuration is optional and handled via environment variables (or `.env`).
 | `ENCODE_CONCURRENCY` | `2` | Max parallel FFmpeg encoding tasks |
 | `SPOTIFY_SEARCH_CONCURRENCY` | `6` | Concurrency for Spotify track search-ahead |
 | `MAX_PLAYLIST_TRACKS` | `30` | Max tracks accepted per playlist/album |
+| `MAX_PLAYLIST_ARCHIVE_BYTES` | `1073741824` (1 GiB) | Maximum aggregate ZIP archive size for playlists |
 | `AGE_GATE_COOKIES` | `off` | Set to `on` to enable the age-restricted account pool |
 | `YTDLP_AGE_COOKIES_DIR` | (unset) | Directory with throwaway `account_*.txt` Netscape cookies |
 | `TRUST_PROXY_HOPS` | `0` | Number of reverse proxy hops to trust for client IP |

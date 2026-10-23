@@ -761,6 +761,10 @@ const ERROR_MESSAGES = {
         message: 'The resulting audio file exceeds the server’s size limit.',
         action: 'try_another'
     },
+    ARCHIVE_LIMIT: {
+        message: 'The playlist archive exceeds the maximum allowed size limit. Try splitting the playlist.',
+        action: 'try_another'
+    },
     TOO_LONG: {
         message: 'This track exceeds the maximum allowed duration.',
         action: 'try_another'
@@ -811,6 +815,7 @@ function formatTrackFailure(code, error) {
         case 'MEMBERS_ONLY': return 'Members only';
         case 'LIVE_NOT_SUPPORTED': return 'Live stream';
         case 'TOO_LARGE': return 'Too large';
+        case 'ARCHIVE_LIMIT': return error || 'Archive limit reached';
         case 'TOO_LONG': return 'Too long';
         case 'UNSUPPORTED_FORMAT': return 'Format error';
         case 'ENCODE_FAILED': return 'Encode failed';
@@ -1878,7 +1883,12 @@ function finish(isCollection) {
 
         if (failedCount > 0) {
             el.doneTitle.textContent = `${readyCount} of ${total} ready, ${failedCount} skipped`;
-            el.doneSub.textContent = 'Your ZIP should be in your downloads folder.';
+            const archiveLimitCount = failedTracks.filter(t => t.code === 'ARCHIVE_LIMIT').length;
+            if (archiveLimitCount > 0) {
+                el.doneSub.textContent = `${archiveLimitCount} track${archiveLimitCount === 1 ? '' : 's'} left out due to archive size cap. Try splitting the playlist into smaller batches.`;
+            } else {
+                el.doneSub.textContent = 'Your ZIP should be in your downloads folder.';
+            }
             el.doneSkipped.hidden = false;
             el.doneSkippedPanel.hidden = true;
             el.doneSkippedToggle.setAttribute('aria-expanded', 'false');

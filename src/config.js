@@ -58,6 +58,15 @@ function booleanEnv(name, fallback) {
     throw new Error(`${name} must be a boolean (on/off, true/false, 1/0).`);
 }
 
+function formatBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(1024));
+    const val = bytes / Math.pow(1024, i);
+    const rounded = (val >= 10 || val % 1 === 0) ? Math.round(val) : Number(val.toFixed(1));
+    return `${rounded} ${units[i]}`;
+}
+
 function positiveIntegerEnv(name, fallback, max) {
     const raw = process.env[name];
     if (raw === undefined || raw === '') return fallback;
@@ -109,6 +118,7 @@ const MAX_PLAYLIST_OUTPUT_BYTES = positiveIntegerEnv('MAX_PLAYLIST_OUTPUT_BYTES'
 const MAX_COVER_BYTES = positiveIntegerEnv('MAX_COVER_BYTES', 5 * 1024 * 1024, 20 * 1024 * 1024);
 const MAX_DOWNLOAD_BYTES = positiveIntegerEnv('MAX_DOWNLOAD_BYTES', 100 * 1024 * 1024, 512 * 1024 * 1024);
 const MAX_AUDIO_OUTPUT_BYTES = positiveIntegerEnv('MAX_AUDIO_OUTPUT_BYTES', 150 * 1024 * 1024, 512 * 1024 * 1024);
+const MAX_PLAYLIST_ARCHIVE_BYTES = positiveIntegerEnv('MAX_PLAYLIST_ARCHIVE_BYTES', 1024 * 1024 * 1024, 10 * 1024 * 1024 * 1024);
 const MAX_ZIP_TRACK_BYTES = positiveIntegerEnv('MAX_ZIP_TRACK_BYTES', 40 * 1024 * 1024, 128 * 1024 * 1024);
 const zipTrackLimit = format => (format === 'flac' || format === 'wav') ? Math.max(MAX_ZIP_TRACK_BYTES, MAX_AUDIO_OUTPUT_BYTES) : MAX_ZIP_TRACK_BYTES;
 const ENCODE_CONCURRENCY = positiveIntegerEnv('ENCODE_CONCURRENCY', Math.max(1, Math.min(2, os.cpus().length)), 8);
@@ -155,6 +165,7 @@ module.exports = {
     COOKIES_PATH,
     positiveIntegerEnv,
     booleanEnv,
+    formatBytes,
     STATIC_CACHE_ENABLED,
     PORT,
     RATE_LIMIT_WINDOW_MS,
@@ -175,6 +186,7 @@ module.exports = {
     MAX_COVER_BYTES,
     MAX_DOWNLOAD_BYTES,
     MAX_AUDIO_OUTPUT_BYTES,
+    MAX_PLAYLIST_ARCHIVE_BYTES,
     MAX_ZIP_TRACK_BYTES,
     zipTrackLimit,
     ENCODE_CONCURRENCY,
