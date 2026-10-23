@@ -129,7 +129,15 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             res.setHeader('Content-Type', mimeType);
             const info = await getYoutubeInfo(url, signal);
             const trackTitle = customTitle || info.title;
+            if (jobId) {
+                job = createJob(jobId, [{ title: trackTitle, artist: info.author || '' }]);
+                report(0, { state: 'downloading', progress: 0 });
+            }
             await processAndStreamAudio(url, audioBitrate, audioFormat, info.thumbnail, res, trackTitle, info.author, signal, req, taskLogger, false);
+            if (jobId) {
+                report(0, { state: 'done', progress: 1 });
+                endJob(jobId, 'finished');
+            }
             return;
         }
 
@@ -479,7 +487,7 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
 
     } catch (error) {
         const appErr = classifyError(error, error?.stderr || '');
-        if (job?.status === 'running') endJob(jobId, signal.aborted ? 'cancelled' : 'failed', appErr);
+        if (jobId) endJob(jobId, signal.aborted ? 'cancelled' : 'failed', appErr);
         if (appErr.code === 'CANCELLED' || signal.aborted || req?.destroyed) {
             taskLogger.info(`Download cancelled: [CANCELLED] Client cancelled or disconnected`);
         } else {
@@ -489,6 +497,12 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             sendError(res, appErr, req);
         } else if (!res.destroyed) res.destroy();
     } finally {
+        if (jobId) {
+            const currentJob = downloadJobs.get(jobId);
+            if (currentJob && (currentJob.status === 'running' || currentJob.status === 'queued')) {
+                endJob(jobId, signal.aborted ? 'cancelled' : 'failed', new AppError(signal.aborted ? 'CANCELLED' : 'INTERNAL'));
+            }
+        }
         if (job) {
             const jobTotalMs = Date.now() - jobStartTime;
             const okCount = job.tracks.filter(t => t.state === 'done').length;
@@ -562,7 +576,7 @@ function registerRoutes(app) {
             if (!job) return;
             lastSent = Date.now();
             res.write(`data: ${JSON.stringify({ ...job, summary: computeJobSummary(job) })}\n\n`);
-            if (job.status !== 'running') {
+            if (job.status !== 'running' && job.status !== 'queued') {
                 cleanup();
                 res.end();
             }
@@ -775,14 +789,22 @@ function registerRoutes(app) {
         const customTitle = title !== undefined ? safeMetadataText(title) : '';
 
         const jobId = typeof req.query.job === 'string' && JOB_ID_PATTERN.test(req.query.job) ? req.query.job : null;
+        const kind = (isYouTubePlaylist(url) || (spotifyLinkDetails(url) && spotifyLinkDetails(url).type !== 'track')) ? 'collection' : 'single';
 
         const accepted = downloadQueue.addTask(
             signal => executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId, customTitle, req),
             res,
-            req
+            req,
+            { jobId, kind }
         );
         if (!accepted) {
-            return sendError(res, new AppError('QUEUE_FULL', { userMessage: 'The download queue is full. Please try again shortly.' }), req);
+            const eta = downloadQueue.estimateWaitSeconds(downloadQueue.maxQueued, kind);
+            let userMessage = 'The download queue is full. Please try again shortly.';
+            if (eta != null) {
+                const waitFormatted = eta <= 90 ? `about ${Math.round(eta)} seconds` : (eta <= 600 ? `about ${Math.round(eta / 60)} minutes` : 'about 10+ minutes');
+                userMessage = `The download queue is full. Please try again in ${waitFormatted}.`;
+            }
+            return sendError(res, new AppError('QUEUE_FULL', { userMessage, detail: eta != null ? { etaSeconds: eta } : null }), req);
         }
     });
 

@@ -2210,6 +2210,13 @@ body[data-stage="working"] .media {
   color: #ef6c00;
 }
 
+.queue-status {
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--md-sys-color-on-surface-variant);
+  text-align: center;
+}
+
 .track__status {
   display: flex;
   align-items: center;

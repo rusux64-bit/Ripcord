@@ -65,6 +65,7 @@ const el = {
     metaLeft: $('#meta-left'),
     metaRight: $('#meta-right'),
     workingHint: $('#working-hint'),
+    queueStatus: $('#queue-status'),
     tracklistWrap: $('#tracklist-wrap'),
     tracklist: $('#tracklist'),
     cancelBtn: $('#cancel-btn'),
@@ -119,6 +120,10 @@ const state = {
     pollEvery: 1000,
     es: null,
     single: false,
+    isSpotifySingle: false,
+    isCollection: false,
+    wasQueued: false,
+    lastQueueAnnouncement: '',
     rows: [],
     activeRow: -1,
     lastJob: null,
@@ -1510,10 +1515,18 @@ function startDownload() {
         ? 'Collections are prepared track by track, so this can take a few minutes. You can leave this tab open.'
         : 'Finding the audio and converting it. Usually under a minute.';
 
-    // Spotify singles are slow (match, download, convert), so they get the same live progress feed as collections
-    state.single = !isCollection && /^https:\/\/open\.spotify\.com\//.test(state.url);
-    state.jobId = (isCollection || state.single) ? newJobId() : '';
-    if (state.jobId) params.set('job', state.jobId);
+    // Every download gets a jobId so queue updates travel over SSE / polling
+    state.isCollection = isCollection;
+    state.isSpotifySingle = !isCollection && /^https:\/\/open\.spotify\.com\//.test(state.url);
+    state.single = !isCollection;
+    state.jobId = newJobId();
+    params.set('job', state.jobId);
+    state.wasQueued = false;
+    state.lastQueueAnnouncement = '';
+    if (el.queueStatus) {
+        el.queueStatus.hidden = true;
+        el.queueStatus.textContent = '';
+    }
     renderTrackList(isCollection ? collectionTracks(info) : []);
 
     state.startedAt = Date.now();
@@ -1529,8 +1542,8 @@ function startDownload() {
 
     xhr.onprogress = event => {
         if (event.loaded === 0) return;
-        // collections report per-track progress through the job poller instead of ZIP bytes
-        if (state.jobId) return;
+        // collections and Spotify singles report per-track progress through the job poller instead of raw bytes
+        if (state.isCollection || state.isSpotifySingle) return;
         if (event.lengthComputable && event.total > 0) {
             const fraction = Math.min(1, event.loaded / event.total);
             const pct = setProgress(fraction);
@@ -1820,8 +1833,73 @@ function applySingleJob(job) {
     el.metaLeft.textContent = label;
 }
 
+function formatWaitEta(etaSeconds) {
+    if (!Number.isFinite(etaSeconds) || etaSeconds <= 0) return null;
+    if (etaSeconds <= 90) return `about ${Math.round(etaSeconds)} s`;
+    if (etaSeconds <= 600) return `about ${Math.round(etaSeconds / 60)} min`;
+    return 'about 10+ min';
+}
+
+function applyQueuedJob(job) {
+    state.wasQueued = true;
+    const q = job.queue || {};
+    const concurrency = q.concurrency || 4;
+    const position = q.position || 1;
+    const etaStr = formatWaitEta(q.etaSeconds);
+
+    const titleText = `All ${concurrency} download slots are busy`;
+    const statusText = `Waiting for a free slot, position ${position}${etaStr ? `, ${etaStr}` : ''}`;
+    const hintText = 'Your download will start automatically once a slot opens. You can leave this tab open.';
+
+    if (el.workingTitle.textContent !== titleText) {
+        el.workingTitle.textContent = titleText;
+    }
+    if (el.metaLeft.textContent !== statusText) {
+        el.metaLeft.textContent = statusText;
+    }
+    if (el.workingHint.textContent !== hintText) {
+        el.workingHint.textContent = hintText;
+    }
+
+    if (state.lastQueueAnnouncement !== statusText) {
+        state.lastQueueAnnouncement = statusText;
+        if (el.queueStatus) {
+            el.queueStatus.hidden = false;
+            el.queueStatus.textContent = statusText;
+        }
+    }
+    resetProgressBar();
+}
+
 function applyJob(job) {
-    if (state.single) return applySingleJob(job);
+    if (!job) return;
+    if (job.status === 'queued') {
+        applyQueuedJob(job);
+        return;
+    }
+
+    if (state.wasQueued) {
+        state.wasQueued = false;
+        state.lastQueueAnnouncement = '';
+        if (el.queueStatus) {
+            el.queueStatus.hidden = true;
+            el.queueStatus.textContent = '';
+        }
+        const isCollection = state.isCollection || Boolean(state.info && (state.mode === 'playlist' || state.info.type === 'collection'));
+        el.workingTitle.textContent = isCollection ? 'Packing up your collection' : 'Pulling the sound out';
+        el.workingHint.textContent = isCollection
+            ? 'Collections are prepared track by track, so this can take a few minutes. You can leave this tab open.'
+            : 'Finding the audio and converting it. Usually under a minute.';
+        if (!state.isSpotifySingle && !isCollection) {
+            el.metaLeft.textContent = 'Preparing download…';
+        }
+    }
+
+    if (state.single) {
+        if (state.isSpotifySingle) return applySingleJob(job);
+        if (job.tracks && job.tracks.length > 0) applySingleJob(job);
+        return;
+    }
     state.lastJob = job;
     const tracks = Array.isArray(job.tracks) ? job.tracks : [];
     if (!tracks.length) return;
@@ -1862,7 +1940,7 @@ function pollJob(jobId) {
             if (res.ok) {
                 const job = await res.json();
                 applyJob(job);
-                if (job.status && job.status !== 'running') return;
+                if (job.status && job.status !== 'running' && job.status !== 'queued') return;
             }
         } catch { /* transient network hiccup; try again on the next tick */ }
         if (state.jobId === jobId) state.poll = setTimeout(tick, state.pollEvery);
@@ -1882,7 +1960,14 @@ function watchJob(jobId) {
             state.pollEvery = 3000;
             es.onmessage = event => {
                 if (state.jobId !== jobId) return;
-                try { applyJob(JSON.parse(event.data)); } catch { /* ignore a malformed frame */ }
+                try {
+                    const job = JSON.parse(event.data);
+                    applyJob(job);
+                    if (job.status && job.status !== 'running' && job.status !== 'queued') {
+                        es.close();
+                        if (state.es === es) state.es = null;
+                    }
+                } catch { /* ignore a malformed frame */ }
             };
             es.onerror = () => {
                 es.close();
@@ -2073,6 +2158,12 @@ el.downloadBtn.addEventListener('click', () => {
 el.cancelBtn.addEventListener('click', () => {
     logClientEvent('action', 'Cancelled download');
     state.jobId = '';
+    state.wasQueued = false;
+    state.lastQueueAnnouncement = '';
+    if (el.queueStatus) {
+        el.queueStatus.hidden = true;
+        el.queueStatus.textContent = '';
+    }
     stopPolling();
     if (state.xhr) state.xhr.abort();
     state.xhr = null;

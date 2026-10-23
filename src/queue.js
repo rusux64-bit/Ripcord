@@ -1,9 +1,47 @@
 const { DOWNLOAD_CONCURRENCY, METADATA_CONCURRENCY, MAX_QUEUED_DOWNLOADS, ENCODE_CONCURRENCY } = require('./config');
-const { Logger } = require('./logger');
+const { Logger, safeMetadataText } = require('./logger');
 const { AppError, classifyError, sendError } = require('./errors');
 
 // open /api/progress/:id/stream responses, so shutdown can end them instead of waiting on them
 const progressStreams = new Set();
+
+const EWMA_ALPHA = 0.3;
+const MIN_SAMPLES_FOR_ETA = 3;
+
+class DurationTracker {
+    constructor(alpha = EWMA_ALPHA) {
+        this.alpha = alpha;
+        this.stats = {
+            single: { count: 0, avg: 0 },
+            collection: { count: 0, avg: 0 }
+        };
+    }
+
+    recordDuration(kind, durationSeconds) {
+        if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) return;
+        const bucket = this.stats[kind] || this.stats.single;
+        if (bucket.count === 0) {
+            bucket.avg = durationSeconds;
+        } else {
+            bucket.avg = (this.alpha * durationSeconds) + ((1 - this.alpha) * bucket.avg);
+        }
+        bucket.count++;
+    }
+
+    getEstimate(position, concurrency, kind) {
+        const bucket = this.stats[kind] || this.stats.single;
+        if (bucket.count < MIN_SAMPLES_FOR_ETA) {
+            return null;
+        }
+        const waves = Math.ceil(Math.max(1, position) / Math.max(1, concurrency));
+        return Math.round(waves * bucket.avg);
+    }
+
+    reset() {
+        this.stats.single = { count: 0, avg: 0 };
+        this.stats.collection = { count: 0, avg: 0 };
+    }
+}
 
 class DownloadQueue {
     constructor(concurrency = DOWNLOAD_CONCURRENCY, maxQueued = MAX_QUEUED_DOWNLOADS) {
@@ -14,24 +52,79 @@ class DownloadQueue {
         this.activeEntries = new Set();
         this.shutdownHooks = new Set();
         this.shuttingDown = false;
+        this.durationTracker = new DurationTracker();
+    }
+
+    estimateWaitSeconds(position, kind = 'single') {
+        return this.durationTracker.getEstimate(position, this.concurrency, kind);
+    }
+
+    recordTaskDuration(kind, durationSeconds) {
+        this.durationTracker.recordDuration(kind, durationSeconds);
+    }
+
+    updateQueuedJobs() {
+        const total = this.queue.length;
+        this.queue.forEach((entry, index) => {
+            const position = index + 1;
+            const etaSeconds = this.estimateWaitSeconds(position, entry.kind);
+            if (entry.jobId) {
+                const job = downloadJobs.get(entry.jobId);
+                if (job && job.status === 'queued') {
+                    job.queue = {
+                        position,
+                        total,
+                        concurrency: this.concurrency,
+                        etaSeconds
+                    };
+                    notifyJob(entry.jobId);
+                }
+            }
+        });
     }
 
     onShutdown(fn) {
         if (typeof fn === 'function') this.shutdownHooks.add(fn);
     }
 
-    addTask(task, res, req = null) {
+    addTask(task, res, req = null, options = {}) {
         if (this.shuttingDown) return false;
         if (this.running >= this.concurrency && this.queue.length >= this.maxQueued) return false;
 
-        const entry = { task, res, req, controller: new AbortController(), started: false };
+        let jobId = null;
+        let kind = 'single';
+        if (typeof options === 'string') {
+            jobId = options;
+            if (arguments.length >= 5) kind = arguments[4];
+        } else if (options && typeof options === 'object') {
+            jobId = options.jobId || null;
+            kind = options.kind || 'single';
+        }
+
+        const entry = { task, res, req, jobId, kind, controller: new AbortController(), started: false };
         entry.onClose = () => {
             if (res.writableEnded) return;
             entry.controller.abort();
-            if (!entry.started) this.queue = this.queue.filter(queued => queued !== entry);
+            if (!entry.started) {
+                this.queue = this.queue.filter(queued => queued !== entry);
+                if (entry.jobId) {
+                    downloadJobs.delete(entry.jobId);
+                    notifyJob(entry.jobId);
+                }
+                this.updateQueuedJobs();
+            }
         };
         res.once('close', entry.onClose);
         this.queue.push(entry);
+
+        if (jobId) {
+            const position = this.queue.length;
+            const total = this.queue.length;
+            const etaSeconds = this.estimateWaitSeconds(position, kind);
+            createPlaceholderJob(jobId, { position, total, concurrency: this.concurrency, etaSeconds });
+        }
+        this.updateQueuedJobs();
+
         Logger.info(`[Queue] Task queued. Position: ${this.queue.length}. Running: ${this.running}/${this.concurrency}`);
         this.process();
         return true;
@@ -45,6 +138,7 @@ class DownloadQueue {
         const entry = this.queue.shift();
         entry.started = true;
         this.activeEntries.add(entry);
+        this.updateQueuedJobs();
 
         if (entry.controller.signal.aborted || entry.res.destroyed) {
             entry.res.removeListener('close', entry.onClose);
@@ -54,7 +148,14 @@ class DownloadQueue {
             return;
         }
 
+        const startTime = Date.now();
         Promise.resolve(entry.task(entry.controller.signal))
+            .then(() => {
+                if (!entry.controller.signal.aborted) {
+                    const durationSeconds = (Date.now() - startTime) / 1000;
+                    this.durationTracker.recordDuration(entry.kind, durationSeconds);
+                }
+            })
             .catch(err => {
                 const appErr = classifyError(err, err?.stderr || '');
                 if (appErr.code !== 'CANCELLED' && !entry.controller.signal.aborted) {
@@ -314,6 +415,28 @@ function computeJobSummary(job) {
     return { total, ok, failed };
 }
 
+function createPlaceholderJob(jobId, queueInfo) {
+    if (!jobId) return null;
+    let job = downloadJobs.get(jobId);
+    if (!job) {
+        if (downloadJobs.size >= MAX_TRACKED_JOBS) downloadJobs.delete(downloadJobs.keys().next().value);
+        job = {
+            status: 'queued',
+            error: null,
+            code: null,
+            tracks: [],
+            queue: queueInfo
+        };
+        job.summary = computeJobSummary(job);
+        downloadJobs.set(jobId, job);
+    } else {
+        job.status = 'queued';
+        job.queue = queueInfo;
+    }
+    notifyJob(jobId);
+    return job;
+}
+
 /**
  * Shared job payload shape:
  * {
@@ -329,24 +452,27 @@ function computeJobSummary(job) {
  */
 function createJob(jobId, tracks) {
     if (!jobId) return null;
-    if (downloadJobs.size >= MAX_TRACKED_JOBS) downloadJobs.delete(downloadJobs.keys().next().value);
-    const job = {
-        status: 'running',
-        error: null,
+    let job = downloadJobs.get(jobId);
+    if (!job) {
+        if (downloadJobs.size >= MAX_TRACKED_JOBS) downloadJobs.delete(downloadJobs.keys().next().value);
+        job = {};
+        downloadJobs.set(jobId, job);
+    }
+    job.status = 'running';
+    delete job.queue;
+    job.error = null;
+    job.code = null;
+    job.tracks = (tracks || []).map(track => ({
+        title: safeMetadataText(track.title || 'Unknown Track'),
+        artist: safeMetadataText(track.artist || ''),
+        state: 'queued',
+        progress: 0,
         code: null,
-        tracks: tracks.map(track => ({
-            title: String(track.title || 'Unknown Track').slice(0, 200),
-            artist: String(track.artist || '').slice(0, 200),
-            state: 'queued',
-            progress: 0,
-            code: null,
-            error: null,
-            detail: null,
-            match: null
-        }))
-    };
+        error: null,
+        detail: null,
+        match: null
+    }));
     job.summary = computeJobSummary(job);
-    downloadJobs.set(jobId, job);
     notifyJob(jobId);
     return job;
 }
@@ -354,6 +480,7 @@ function createJob(jobId, tracks) {
 function endJob(jobId, status, errorInfo = null) {
     const job = jobId && downloadJobs.get(jobId);
     if (!job) return;
+    delete job.queue;
     job.status = status;
     if (errorInfo) {
         if (errorInfo instanceof AppError) {
@@ -388,6 +515,7 @@ const ytdlpSemaphore = new Semaphore(DOWNLOAD_CONCURRENCY);
 const ffmpegSemaphore = new Semaphore(ENCODE_CONCURRENCY);
 
 module.exports = {
+    DurationTracker,
     DownloadQueue,
     downloadQueue,
     MetadataSemaphore,
@@ -402,6 +530,7 @@ module.exports = {
     subscribeJob,
     notifyJob,
     computeJobSummary,
+    createPlaceholderJob,
     createJob,
     endJob
 };
