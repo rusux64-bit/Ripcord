@@ -127,7 +127,7 @@ test('static cache headers in production mode (enabled)', async () => {
         assert.ok(resSpa.body.includes(`script.js?v=${hashes['script.js']}`));
 
         // 9. /api/... is untouched by static caching
-        const resApi = await request(server, '/api/ready');
+        const resApi = await request(server, '/api/health');
         assert.equal(resApi.statusCode, 200);
         assert.notEqual(resApi.headers['cache-control'], 'public, max-age=31536000, immutable');
     } finally {
