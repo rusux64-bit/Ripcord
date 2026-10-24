@@ -10,6 +10,7 @@ const cookies = require('./src/cookies');
 const media = require('./src/media');
 const spotify = require('./src/spotify');
 const youtube = require('./src/youtube');
+const quota = require('./src/quota');
 const routes = require('./src/routes');
 const bootstrap = require('./src/bootstrap');
 
@@ -124,6 +125,17 @@ module.exports = {
     downloadPlaylistTrack: youtube.downloadPlaylistTrack,
     processPlaylistTrack: youtube.processPlaylistTrack,
     processAndStreamAudio: youtube.processAndStreamAudio,
+
+    // Quota & Tracking
+    DEVICE_COOKIE_NAME: quota.DEVICE_COOKIE_NAME,
+    signDeviceId: quota.signDeviceId,
+    verifyDeviceCookie: quota.verifyDeviceCookie,
+    getCookie: quota.getCookie,
+    formatDeviceCookie: quota.formatDeviceCookie,
+    resolveDeviceIdentity: quota.resolveDeviceIdentity,
+    extractClientSubnet: quota.extractClientSubnet,
+    SlidingQuotaTracker: quota.SlidingQuotaTracker,
+    quotaTracker: quota.quotaTracker,
 
     // Routes & Jobs
     createRateLimiter: routes.createRateLimiter,

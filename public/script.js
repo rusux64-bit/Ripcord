@@ -1845,11 +1845,18 @@ function applyQueuedJob(job) {
     const q = job.queue || {};
     const concurrency = q.concurrency || 4;
     const position = q.position || 1;
+    const isLowPriority = q.priority === 'low';
     const etaStr = formatWaitEta(q.etaSeconds);
 
-    const titleText = `All ${concurrency} download slots are busy`;
-    const statusText = `Waiting for a free slot, position ${position}${etaStr ? `, ${etaStr}` : ''}`;
-    const hintText = 'Your download will start automatically once a slot opens. You can leave this tab open.';
+    const titleText = isLowPriority
+        ? 'Bulk mode active · Running when server is idle'
+        : `All ${concurrency} download slots are busy`;
+    const statusText = isLowPriority
+        ? `Bulk queue position ${position} (daily quota reached · waiting for idle capacity)`
+        : `Waiting for a free slot, position ${position}${etaStr ? `, ${etaStr}` : ''}`;
+    const hintText = isLowPriority
+        ? 'Bulk mode is active (500+ songs in 24h). Your download will start when standard requests finish.'
+        : 'Your download will start automatically once a slot opens. You can leave this tab open.';
 
     if (el.workingTitle.textContent !== titleText) {
         el.workingTitle.textContent = titleText;

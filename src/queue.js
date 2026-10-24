@@ -49,6 +49,7 @@ class DownloadQueue {
         this.maxQueued = maxQueued;
         this.running = 0;
         this.queue = [];
+        this.lowPriorityQueue = [];
         this.activeEntries = new Set();
         this.shutdownHooks = new Set();
         this.shuttingDown = false;
@@ -64,7 +65,7 @@ class DownloadQueue {
     }
 
     updateQueuedJobs() {
-        const total = this.queue.length;
+        const total = this.queue.length + this.lowPriorityQueue.length;
         this.queue.forEach((entry, index) => {
             const position = index + 1;
             const etaSeconds = this.estimateWaitSeconds(position, entry.kind);
@@ -75,7 +76,26 @@ class DownloadQueue {
                         position,
                         total,
                         concurrency: this.concurrency,
-                        etaSeconds
+                        etaSeconds,
+                        priority: 'normal'
+                    };
+                    notifyJob(entry.jobId);
+                }
+            }
+        });
+
+        this.lowPriorityQueue.forEach((entry, index) => {
+            const position = this.queue.length + index + 1;
+            const etaSeconds = this.estimateWaitSeconds(position, entry.kind);
+            if (entry.jobId) {
+                const job = downloadJobs.get(entry.jobId);
+                if (job && job.status === 'queued') {
+                    job.queue = {
+                        position,
+                        total,
+                        concurrency: this.concurrency,
+                        etaSeconds,
+                        priority: 'low'
                     };
                     notifyJob(entry.jobId);
                 }
@@ -89,24 +109,43 @@ class DownloadQueue {
 
     addTask(task, res, req = null, options = {}) {
         if (this.shuttingDown) return false;
-        if (this.running >= this.concurrency && this.queue.length >= this.maxQueued) return false;
+        const totalQueued = this.queue.length + this.lowPriorityQueue.length;
+        if (this.running >= this.concurrency && totalQueued >= this.maxQueued) return false;
 
         let jobId = null;
         let kind = 'single';
+        let priority = 'normal';
+        let deviceId = null;
+        let subnet = null;
         if (typeof options === 'string') {
             jobId = options;
             if (arguments.length >= 5) kind = arguments[4];
         } else if (options && typeof options === 'object') {
             jobId = options.jobId || null;
             kind = options.kind || 'single';
+            priority = options.priority === 'low' ? 'low' : 'normal';
+            deviceId = options.deviceId || null;
+            subnet = options.subnet || null;
         }
 
-        const entry = { task, res, req, jobId, kind, controller: new AbortController(), started: false };
+        const entry = {
+            task,
+            res,
+            req,
+            jobId,
+            kind,
+            priority,
+            deviceId,
+            subnet,
+            controller: new AbortController(),
+            started: false
+        };
         entry.onClose = () => {
             if (res.writableEnded) return;
             entry.controller.abort();
             if (!entry.started) {
                 this.queue = this.queue.filter(queued => queued !== entry);
+                this.lowPriorityQueue = this.lowPriorityQueue.filter(queued => queued !== entry);
                 if (entry.jobId) {
                     downloadJobs.delete(entry.jobId);
                     notifyJob(entry.jobId);
@@ -115,27 +154,53 @@ class DownloadQueue {
             }
         };
         res.once('close', entry.onClose);
-        this.queue.push(entry);
+
+        if (priority === 'low') {
+            this.lowPriorityQueue.push(entry);
+        } else {
+            this.queue.push(entry);
+        }
 
         if (jobId) {
-            const position = this.queue.length;
-            const total = this.queue.length;
+            const position = priority === 'low'
+                ? this.queue.length + this.lowPriorityQueue.length
+                : this.queue.length;
             const etaSeconds = this.estimateWaitSeconds(position, kind);
-            createPlaceholderJob(jobId, { position, total, concurrency: this.concurrency, etaSeconds });
+            createPlaceholderJob(jobId, {
+                position,
+                total: this.queue.length + this.lowPriorityQueue.length,
+                concurrency: this.concurrency,
+                etaSeconds,
+                priority
+            });
         }
         this.updateQueuedJobs();
 
-        Logger.info(`[Queue] Task queued. Position: ${this.queue.length}. Running: ${this.running}/${this.concurrency}`);
+        Logger.info(`[Queue] Task queued. Position: ${priority === 'low' ? this.queue.length + this.lowPriorityQueue.length : this.queue.length}. Running: ${this.running}/${this.concurrency}`);
         this.process();
         return true;
     }
 
     process() {
         if (this.shuttingDown) return;
-        if (this.running >= this.concurrency || this.queue.length === 0) return;
+        if (this.running >= this.concurrency) return;
+        if (this.queue.length === 0 && this.lowPriorityQueue.length === 0) return;
+
+        let entry = null;
+        if (this.queue.length > 0) {
+            entry = this.queue.shift();
+        } else if (this.lowPriorityQueue.length > 0) {
+            entry = this.lowPriorityQueue.shift();
+            Logger.info('[fair_share] Processing low-priority task during idle capacity (normal queue: 0).', {
+                jobId: entry.jobId,
+                deviceId: entry.deviceId,
+                subnet: entry.subnet
+            });
+        }
+
+        if (!entry) return;
 
         this.running++;
-        const entry = this.queue.shift();
         entry.started = true;
         this.activeEntries.add(entry);
         this.updateQueuedJobs();
@@ -178,16 +243,20 @@ class DownloadQueue {
         for (const stream of progressStreams) {
             try { stream.end(); } catch { /* already closed */ }
         }
-        while (this.queue.length > 0) {
-            const entry = this.queue.shift();
-            entry.res.removeListener('close', entry.onClose);
-            entry.controller.abort();
-            if (!entry.res.headersSent) {
-                sendError(entry.res, new AppError('SERVER_SHUTTING_DOWN'), entry.req);
-            } else if (!entry.res.destroyed) {
-                entry.res.destroy();
+        const drain = (q) => {
+            while (q.length > 0) {
+                const entry = q.shift();
+                entry.res.removeListener('close', entry.onClose);
+                entry.controller.abort();
+                if (!entry.res.headersSent) {
+                    sendError(entry.res, new AppError('SERVER_SHUTTING_DOWN'), entry.req);
+                } else if (!entry.res.destroyed) {
+                    entry.res.destroy();
+                }
             }
-        }
+        };
+        drain(this.queue);
+        drain(this.lowPriorityQueue);
     }
 
     abortAll() {

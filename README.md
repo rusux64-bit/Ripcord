@@ -51,6 +51,9 @@ All configuration is optional and handled via environment variables (or `.env`).
 | `YTDLP_AGE_COOKIES_DIR` | (unset) | Directory with throwaway `account_*.txt` Netscape cookies |
 | `TRUST_PROXY_HOPS` | `0` | Number of reverse proxy hops to trust for client IP |
 | `STATIC_CACHE` | `on` (prod) / `off` (dev) | Enable content-fingerprinted asset URLs and long-lived cache headers |
+| `DAILY_QUOTA_SONGS` | `500` | Rolling daily download quota per client; 0 disables fair-share queuing |
+| `DAILY_QUOTA_WINDOW_HOURS` | `24` | Sliding quota window in hours |
+| `DEVICE_COOKIE_SECRET` | (auto-generated) | Optional persistent secret for HMAC-signed client device cookies |
 
 See `.env.example` for all options.
 

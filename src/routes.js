@@ -18,8 +18,13 @@ const {
     JOB_ID_PATTERN,
     ffmpegPath,
     MAX_PLAYLIST_ARCHIVE_BYTES,
-    formatBytes
+    formatBytes,
+    DAILY_QUOTA_SONGS,
+    DAILY_QUOTA_WINDOW_HOURS,
+    DEVICE_COOKIE_SECRET
 } = require('./config');
+
+const { resolveDeviceIdentity, extractClientSubnet, quotaTracker } = require('./quota');
 
 const { Logger, startStage, safeMetadataText, sanitizeAsciiHeader } = require('./logger');
 const { AppError, classifyError, sendError } = require('./errors');
@@ -170,6 +175,17 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
             await processAndStreamAudio(downloaded.tempAudioPath, audioBitrate, audioFormat, track.thumbnail, res, trackTitle, track.artist, signal, req, taskLogger, true);
             report(0, { state: 'done', progress: 1 });
             endJob(jobId, 'finished');
+            if (DAILY_QUOTA_SONGS > 0 && req?.deviceId) {
+                quotaTracker.recordSuccess(req.deviceId, req.clientSubnet, 1);
+                const usage = quotaTracker.getUsage(req.deviceId, req.clientSubnet, DAILY_QUOTA_WINDOW_HOURS);
+                taskLogger.info('[fair_share] Download completed. Quota updated.', {
+                    deviceId: req.deviceId,
+                    subnet: req.clientSubnet,
+                    added: 1,
+                    total: usage.maxCount,
+                    quotaLimit: DAILY_QUOTA_SONGS
+                });
+            }
             return;
         }
 
@@ -469,6 +485,17 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
 
                 endJob(jobId, 'finished');
                 taskLogger.success(`Archive completed: ${zipBase} (${addedTracks} tracks, ${formatBytes(archiveBytes)})`);
+                if (DAILY_QUOTA_SONGS > 0 && req?.deviceId && addedTracks > 0) {
+                    quotaTracker.recordSuccess(req.deviceId, req.clientSubnet, addedTracks);
+                    const usage = quotaTracker.getUsage(req.deviceId, req.clientSubnet, DAILY_QUOTA_WINDOW_HOURS);
+                    taskLogger.info('[fair_share] Download completed. Quota updated.', {
+                        deviceId: req.deviceId,
+                        subnet: req.clientSubnet,
+                        added: addedTracks,
+                        total: usage.maxCount,
+                        quotaLimit: DAILY_QUOTA_SONGS
+                    });
+                }
             } catch (jobErr) {
                 const appErr = classifyError(jobErr, jobErr?.stderr || '');
                 if (job?.status === 'running') endJob(jobId, signal.aborted ? 'cancelled' : 'failed', appErr);
@@ -526,6 +553,24 @@ async function executeDownloadTask(url, audioBitrate, audioFormat, safeFilename,
 }
 
 function registerRoutes(app) {
+    app.use((req, res, next) => {
+        const clientIp = req.ip || req.socket?.remoteAddress || '127.0.0.1';
+        req.clientSubnet = extractClientSubnet(clientIp);
+        const { deviceId, setCookieHeader } = resolveDeviceIdentity(req, DEVICE_COOKIE_SECRET);
+        req.deviceId = deviceId;
+        if (setCookieHeader) {
+            const existing = res.getHeader('Set-Cookie');
+            if (!existing) {
+                res.setHeader('Set-Cookie', setCookieHeader);
+            } else if (Array.isArray(existing)) {
+                res.setHeader('Set-Cookie', [...existing, setCookieHeader]);
+            } else {
+                res.setHeader('Set-Cookie', [existing, setCookieHeader]);
+            }
+        }
+        next();
+    });
+
     app.use('/api', (req, res, next) => {
         res.setHeader('Cache-Control', 'no-store');
         next();
@@ -791,11 +836,29 @@ function registerRoutes(app) {
         const jobId = typeof req.query.job === 'string' && JOB_ID_PATTERN.test(req.query.job) ? req.query.job : null;
         const kind = (isYouTubePlaylist(url) || (spotifyLinkDetails(url) && spotifyLinkDetails(url).type !== 'track')) ? 'collection' : 'single';
 
+        const overQuota = DAILY_QUOTA_SONGS > 0 && quotaTracker.isOverQuota(
+            req.deviceId,
+            req.clientSubnet,
+            DAILY_QUOTA_SONGS,
+            DAILY_QUOTA_WINDOW_HOURS
+        );
+        const priority = overQuota ? 'low' : 'normal';
+        if (overQuota) {
+            const usage = quotaTracker.getUsage(req.deviceId, req.clientSubnet, DAILY_QUOTA_WINDOW_HOURS);
+            Logger.info('[fair_share] Client over daily quota. Task queued at LOW priority.', {
+                deviceId: req.deviceId,
+                subnet: req.clientSubnet,
+                songsInWindow: usage.maxCount,
+                quotaLimit: DAILY_QUOTA_SONGS,
+                jobId
+            });
+        }
+
         const accepted = downloadQueue.addTask(
             signal => executeDownloadTask(url, audioBitrate, audioFormat, safeFilename, res, signal, jobId, customTitle, req),
             res,
             req,
-            { jobId, kind }
+            { jobId, kind, priority, deviceId: req.deviceId, subnet: req.clientSubnet }
         );
         if (!accepted) {
             const eta = downloadQueue.estimateWaitSeconds(downloadQueue.maxQueued, kind);

@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 
 try {
@@ -153,6 +154,10 @@ const COOKIE_GUARD_PER_ACCOUNT_HOURLY = positiveIntegerEnv('COOKIE_GUARD_PER_ACC
 const COOKIE_GUARD_PER_ACCOUNT_DAILY = positiveIntegerEnv('COOKIE_GUARD_PER_ACCOUNT_DAILY', 30, 500);
 const COOKIE_GUARD_GLOBAL_HOURLY = positiveIntegerEnv('COOKIE_GUARD_GLOBAL_HOURLY', 15, 500);
 
+const DAILY_QUOTA_SONGS = nonNegativeIntegerEnv('DAILY_QUOTA_SONGS', 500, 100000);
+const DAILY_QUOTA_WINDOW_HOURS = positiveIntegerEnv('DAILY_QUOTA_WINDOW_HOURS', 24, 168);
+const DEVICE_COOKIE_SECRET = (process.env.DEVICE_COOKIE_SECRET || '').trim() || crypto.randomBytes(32).toString('hex');
+
 const JOB_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
 
 module.exports = {
@@ -206,5 +211,8 @@ module.exports = {
     COOKIE_GUARD_PER_ACCOUNT_HOURLY,
     COOKIE_GUARD_PER_ACCOUNT_DAILY,
     COOKIE_GUARD_GLOBAL_HOURLY,
+    DAILY_QUOTA_SONGS,
+    DAILY_QUOTA_WINDOW_HOURS,
+    DEVICE_COOKIE_SECRET,
     JOB_ID_PATTERN
 };
