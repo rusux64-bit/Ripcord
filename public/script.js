@@ -1329,8 +1329,16 @@ function refreshSlider() {
     crossfadeText(el.bitrateOut, LOSSLESS.has(currentFormat()) ? 'Lossless' : `${BITRATES[el.bitrate.value]} kbps`);
 }
 
+const savedFormat = store.get('ripcord.format', 'm4a');
+const preferredFormat = typeof savedFormat === 'string' && Object.hasOwn(FORMAT_HINTS, savedFormat)
+    ? savedFormat
+    : 'm4a';
 $$('input[name="format"]').forEach(i => {
-    i.addEventListener('change', refreshFormat);
+    i.checked = i.value === preferredFormat;
+    i.addEventListener('change', () => {
+        store.set('ripcord.format', currentFormat());
+        refreshFormat();
+    });
     i.addEventListener('input', refreshFormat);
 });
 $$('input[name="namestyle"]').forEach(i => i.addEventListener('change', () => {
