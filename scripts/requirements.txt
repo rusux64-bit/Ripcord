@@ -1,1 +1,1 @@
-fonttools[brotli,woff]==4.67.0
+fonttools[brotli,woff]==4.68.0
